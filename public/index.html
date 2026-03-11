@@ -11,10 +11,17 @@
 <body>
 
     <div class="toolbar">
-        <button class="btn" onclick="exportPDF()">Export to PDF (导出PDF)</button>
+        <div class="jyt-import" style="display: flex; gap: 10px; align-items: center; border-right: 1px solid #ccc; padding-right: 15px; margin-right: 15px;">
+            <input type="text" id="jyt-link" placeholder="Paste JYT Link here (金鱼塘链接)" style="padding: 8px; width: 250px; border-radius: 4px; border: 1px solid #ddd;">
+            <button class="btn" onclick="fetchJytData()" style="background-color: #4CAF50;">Fetch & Translate</button>
+        </div>
+        
+        <button class="btn" onclick="exportPDF()">Export PDF</button>
+        <button class="btn" onclick="downloadHTML()" style="background-color: #2196F3;">Download HTML</button>
+        
         <div class="color-control">
             <label for="color-picker" style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
-                <i class="fas fa-palette"></i> Pick Color (选择颜色)
+                <i class="fas fa-palette"></i> Color
             </label>
             <input type="color" id="color-picker" value="#d81e06">
         </div>

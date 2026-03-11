@@ -394,3 +394,195 @@ function exportPDF() {
         document.body.classList.remove('exporting');
     });
 }
+
+// Fetch JYT Data
+async function fetchJytData() {
+    const linkInput = document.getElementById('jyt-link');
+    const link = linkInput.value.trim();
+    if (!link) {
+        alert("Please enter a JYT link");
+        return;
+    }
+
+    const btn = document.querySelector('.jyt-import button');
+    const originalText = btn.innerText;
+    btn.innerText = "Loading...";
+    btn.disabled = true;
+
+    try {
+        const res = await fetch(`/api/jyt-car?link=${encodeURIComponent(link)}`);
+        const data = await res.json();
+        
+        if (!res.ok) throw new Error(data.error || "Failed to fetch");
+
+        const titleEl = document.querySelector('.main-title');
+        if (titleEl) titleEl.innerText = data.name;
+
+        const sectionTitles = document.querySelectorAll('.section-title');
+        if (sectionTitles.length >= 2) {
+            sectionTitles[0].innerText = 'VEHICLE PHOTO GALLERY';
+            sectionTitles[1].innerText = 'VEHICLE PHOTO GALLERY';
+        }
+        
+        const cardsContainer = document.querySelector('.cards-row');
+        if (cardsContainer) {
+            cardsContainer.innerHTML = '';
+            
+            const card = document.createElement('div');
+            card.className = 'card';
+            card.innerHTML = `
+                <div class="card-title" contenteditable="true">${data.name}</div>
+                <div class="card-detail" contenteditable="true">
+                    MILEAGE: ${data.mileage}<br>
+                    REG. DATE: ${data.plate_date}<br>
+                    ${data.description ? `DESC: ${data.description.substring(0, 100)}` : ''}
+                </div>
+                <div class="card-price" contenteditable="true">PRICE: ${data.price}</div>
+            `;
+            addDeleteButton(card);
+            cardsContainer.appendChild(card);
+        }
+
+        const imageGrids = document.querySelectorAll('.image-grid');
+        imageGrids.forEach(grid => grid.innerHTML = '');
+        
+        const images = data.images || [];
+        
+        const buildProxiedUrl = (imgUrl) => `/proxy-image?url=${encodeURIComponent(imgUrl)}`;
+        const attachRetry = (imgEl, imgUrl) => {
+            let attempts = 0;
+            const maxAttempts = 3;
+            const load = () => {
+                const bust = Date.now();
+                imgEl.src = `${buildProxiedUrl(imgUrl)}&t=${bust}`;
+            };
+            imgEl.onerror = () => {
+                if (attempts >= maxAttempts) return;
+                attempts += 1;
+                setTimeout(load, 700 * attempts);
+            };
+            load();
+        };
+
+        images.forEach((imgUrl, index) => {
+            let targetGrid = imageGrids[0];
+            if (index >= 6 && imageGrids[1]) {
+                targetGrid = imageGrids[1];
+            }
+            
+            if (targetGrid) {
+                const slot = document.createElement('div');
+                slot.className = 'img-container';
+                slot.setAttribute('onclick', "triggerUpload(this.querySelector('img'))");
+                const img = document.createElement('img');
+                img.alt = 'Car Image';
+                img.loading = 'lazy';
+                img.decoding = 'async';
+                attachRetry(img, imgUrl);
+                slot.appendChild(img);
+                
+                addDeleteButton(slot);
+                enableDragAndDrop(slot);
+                addLabelControl(slot);
+                
+                targetGrid.appendChild(slot);
+            }
+        });
+
+    } catch (err) {
+        console.error(err);
+        alert("Error importing data: " + err.message);
+    } finally {
+        btn.innerText = originalText;
+        btn.disabled = false;
+    }
+}
+
+// Download HTML
+async function downloadHTML() {
+    const quotationEl = document.getElementById('quotation-content');
+    if (!quotationEl) {
+        alert('Quotation content not found.');
+        return;
+    }
+
+    const btn = document.querySelector('button[onclick="downloadHTML()"]');
+    const originalText = btn ? btn.innerText : null;
+    if (btn) {
+        btn.innerText = 'Preparing...';
+        btn.disabled = true;
+    }
+
+    document.body.classList.add('exporting');
+
+    try {
+        const cssRes = await fetch('css/style.css', { cache: 'no-store' });
+        const cssText = cssRes.ok ? await cssRes.text() : '';
+
+        const clone = quotationEl.cloneNode(true);
+        clone.querySelectorAll('.delete-btn, .add-btn-container, .add-label-btn, .toolbar').forEach((el) => el.remove());
+        clone.querySelectorAll('[onclick]').forEach((el) => el.removeAttribute('onclick'));
+
+        const toDataUrl = async (url) => {
+            const res = await fetch(url, { cache: 'no-store' });
+            if (!res.ok) throw new Error('fetch failed');
+            const blob = await res.blob();
+            return await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+        };
+
+        const imgs = Array.from(clone.querySelectorAll('img'));
+        for (const img of imgs) {
+            const rawSrc = img.getAttribute('src') || '';
+            if (!rawSrc) continue;
+            const resolvedSrc = new URL(rawSrc, window.location.href).toString();
+            try {
+                const dataUrl = await toDataUrl(resolvedSrc);
+                img.setAttribute('src', dataUrl);
+            } catch (_) {
+                img.setAttribute('src', resolvedSrc);
+            }
+        }
+
+        const titleText = (document.querySelector('.main-title')?.innerText || 'quotation')
+            .replace(/[\\/:*?"<>|]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const exportHtml = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${titleText}</title>
+  <style>${cssText}</style>
+  <style>
+    body { background: #ffffff; padding: 20px; }
+  </style>
+</head>
+<body class="exporting">
+${clone.outerHTML}
+</body>
+</html>`;
+
+        const blob = new Blob([exportHtml], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${titleText || 'quotation'}.html`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } finally {
+        document.body.classList.remove('exporting');
+        if (btn) {
+            btn.innerText = originalText;
+            btn.disabled = false;
+        }
+    }
+}
