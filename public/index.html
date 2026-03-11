@@ -14,6 +14,10 @@
         <div class="jyt-import" style="display: flex; gap: 10px; align-items: center; border-right: 1px solid #ccc; padding-right: 15px; margin-right: 15px;">
             <input type="text" id="jyt-link" placeholder="Paste JYT Link here (金鱼塘链接)" style="padding: 8px; width: 250px; border-radius: 4px; border: 1px solid #ddd;">
             <button class="btn" onclick="fetchJytData()" style="background-color: #4CAF50;">Fetch & Translate</button>
+            <span style="font-size: 12px; color: #666;">USD/CNY</span>
+            <input type="number" id="usd-cny-rate" value="6.8" step="0.01" style="padding: 8px; width: 90px; border-radius: 4px; border: 1px solid #ddd;">
+            <span style="font-size: 12px; color: #666;">FOB +CNY</span>
+            <input type="number" id="fob-markup-cny" value="20000" step="1" style="padding: 8px; width: 110px; border-radius: 4px; border: 1px solid #ddd;">
         </div>
         
         <button class="btn" onclick="exportPDF()">Export PDF</button>

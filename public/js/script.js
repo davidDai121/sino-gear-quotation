@@ -404,13 +404,21 @@ async function fetchJytData() {
         return;
     }
 
+    const usdCnyRateValue = (document.getElementById('usd-cny-rate')?.value || '').trim();
+    const fobMarkupCnyValue = (document.getElementById('fob-markup-cny')?.value || '').trim();
+
     const btn = document.querySelector('.jyt-import button');
     const originalText = btn.innerText;
     btn.innerText = "Loading...";
     btn.disabled = true;
 
     try {
-        const res = await fetch(`/api/jyt-car?link=${encodeURIComponent(link)}`);
+        const params = new URLSearchParams();
+        params.set('link', link);
+        if (usdCnyRateValue) params.set('usd_cny_rate', usdCnyRateValue);
+        if (fobMarkupCnyValue) params.set('fob_markup_cny', fobMarkupCnyValue);
+
+        const res = await fetch(`/api/jyt-car?${params.toString()}`);
         const data = await res.json();
         
         if (!res.ok) throw new Error(data.error || "Failed to fetch");
@@ -430,14 +438,16 @@ async function fetchJytData() {
             
             const card = document.createElement('div');
             card.className = 'card';
+            const fobUsdLabel = data.fob_usd_label || (Number.isFinite(data.fob_usd) ? `$${Math.round(data.fob_usd).toLocaleString()}` : null);
+            const priceLine = fobUsdLabel ? `FOB CHINA: ${fobUsdLabel}` : `PRICE: ${data.price}`;
             card.innerHTML = `
                 <div class="card-title" contenteditable="true">${data.name}</div>
                 <div class="card-detail" contenteditable="true">
                     MILEAGE: ${data.mileage}<br>
                     REG. DATE: ${data.plate_date}<br>
-                    ${data.description ? `DESC: ${data.description.substring(0, 100)}` : ''}
+                    ${data.description ? `DESC: ${data.description}` : ''}
                 </div>
-                <div class="card-price" contenteditable="true">PRICE: ${data.price}</div>
+                <div class="card-price" contenteditable="true">${priceLine}</div>
             `;
             addDeleteButton(card);
             cardsContainer.appendChild(card);
