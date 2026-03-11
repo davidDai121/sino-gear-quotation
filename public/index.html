@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sino Gear Quotation</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+</head>
+<body>
+
+    <div class="toolbar">
+        <button class="btn" onclick="exportPDF()">Export to PDF (导出PDF)</button>
+        <div class="color-control">
+            <label for="color-picker" style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
+                <i class="fas fa-palette"></i> Pick Color (选择颜色)
+            </label>
+            <input type="color" id="color-picker" value="#d81e06">
+        </div>
+    </div>
+
+    <div class="a4-container" id="quotation-content">
+        <div class="watermark"></div>
+        
+        <div class="content-layer">
+            <div class="header">
+                <div class="logo-section">
+                    <img src="assets/二手车图文报价.png" onerror="this.src='https://placehold.co/200x70?text=Click+&+Paste+Logo';this.onclick=function(){triggerUpload(this)}" alt="Sino Gear" class="logo-img">
+                    <div class="company-info" contenteditable="true">
+                        <strong>SINO GEAR POWER TECHNOLOGY CO., LTD</strong><br>
+                        ROOM 1307, OFFICE FLOOR, BUILDING 1, HUANGSHAN CENTER, HEFEI CITY, ANHUI PROVINCE
+                    </div>
+                </div>
+                <div class="qr-section">
+                    <div class="qr-item">
+                        <img src="assets/Wechat QR.png" onerror="this.src='https://placehold.co/90x90?text=Paste+QR';this.onclick=function(){triggerUpload(this)}" alt="WeChat">
+                        <div contenteditable="true">WECHAT</div>
+                    </div>
+                    <div class="qr-item">
+                        <img src="assets/WhatsApp QR.png" onerror="this.src='https://placehold.co/90x90?text=Paste+QR';this.onclick=function(){triggerUpload(this)}" alt="WhatsApp">
+                        <div contenteditable="true">WHATSAPP</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="title-row">
+                <div class="main-title" contenteditable="true">2024 KIA K3 QUOTATION</div>
+                <div class="date" contenteditable="true" id="quotation-date">DATE: 2025.11.11</div>
+            </div>
+
+            <div class="cards-row">
+                <div class="card">
+                    <div class="card-title" contenteditable="true">2024 1.5L CVT COMFORT PREMIUM EDITION</div>
+                    <div class="card-detail" contenteditable="true">
+                        ENERGY: PURE GASOLINE<br>
+                        ENGINE: 1.5L 115 HP L4
+                    </div>
+                    <div class="card-price" contenteditable="true">PRICE: $11,450</div>
+                </div>
+                <div class="card">
+                    <div class="card-title" contenteditable="true">2024 1.5L CVT LUXURY INTELLIGENT EDITION</div>
+                    <div class="card-detail" contenteditable="true">
+                        ENERGY: PURE GASOLINE<br>
+                        ENGINE: 1.5L 115 HP L4
+                    </div>
+                    <div class="card-price" contenteditable="true">PRICE: $13,857</div>
+                </div>
+            </div>
+            <div class="add-btn-container">
+                <button class="add-btn" onclick="addCard(this.parentElement.previousElementSibling)"><i class="fas fa-plus"></i> Add Card</button>
+            </div>
+
+            <div class="section-title" contenteditable="true">EXTERIOR COLORS AVAILABLE</div>
+            <div class="image-grid">
+                <div class="img-container" onclick="triggerUpload(this.querySelector('img'))">
+                    <img src="https://placehold.co/600x400?text=Car+Front+Left" alt="Car Image">
+                </div>
+                <div class="img-container" onclick="triggerUpload(this.querySelector('img'))">
+                    <img src="https://placehold.co/600x400?text=Car+Rear+Right" alt="Car Image">
+                </div>
+                
+                <div class="img-container" onclick="triggerUpload(this.querySelector('img'))">
+                    <img src="https://placehold.co/600x400?text=Car+Front+Left" alt="Car Image">
+                </div>
+                <div class="img-container" onclick="triggerUpload(this.querySelector('img'))">
+                    <img src="https://placehold.co/600x400?text=Car+Rear+Right" alt="Car Image">
+                </div>
+
+                <div class="img-container" onclick="triggerUpload(this.querySelector('img'))">
+                    <img src="https://placehold.co/600x400?text=Car+Front+Left" alt="Car Image">
+                </div>
+                <div class="img-container" onclick="triggerUpload(this.querySelector('img'))">
+                    <img src="https://placehold.co/600x400?text=Car+Rear+Right" alt="Car Image">
+                </div>
+            </div>
+            <div class="add-btn-container">
+                <button class="add-btn" onclick="addImageSlot(this.parentElement.previousElementSibling)"><i class="fas fa-plus"></i> Add Image Slot</button>
+            </div>
+
+            <div class="section-title" contenteditable="true">INTERIOR DISPLAY</div>
+            <div class="image-grid">
+                <div class="img-container" onclick="triggerUpload(this.querySelector('img'))">
+                    <img src="https://placehold.co/600x400?text=Interior+Black" alt="Interior Image">
+                </div>
+                <div class="img-container" onclick="triggerUpload(this.querySelector('img'))">
+                    <img src="https://placehold.co/600x400?text=Interior+Grey" alt="Interior Image">
+                </div>
+            </div>
+            <div class="add-btn-container">
+                <button class="add-btn" onclick="addImageSlot(this.parentElement.previousElementSibling)"><i class="fas fa-plus"></i> Add Image Slot</button>
+            </div>
+
+            <div class="footer-attention">
+                <div class="attention-title" contenteditable="true">ATTENTION:</div>
+                <div contenteditable="true">
+                    1. THE PRICE OF USED CARS IS DETERMINED BY THEIR CONDITION, SO THERE WILL BE DIFFERENCES IN PRICES.<br>
+                    2. VEHICLE QUOTATIONS ARE TIME-SENSITIVE, AND THE PRICES USUALLY REMAIN VALID FOR ONE WEEK.<br>
+                    3. THE VEHICLES ARE IN THE FOR-SALE STATUS. BEFORE A DEPOSIT IS RECEIVED, THEY MAY BE SOLD AT ANY TIME.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <input type="file" id="file-input" accept="image/*">
+    <script src="js/script.js"></script>
+</body>
+</html>

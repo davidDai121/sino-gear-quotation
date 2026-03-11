@@ -1,0 +1,19 @@
+{
+  "name": "sino-gear-quotation",
+  "version": "1.0.0",
+  "description": "Sino Gear Quotation Generator",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "http-server": "^14.1.1"
+  },
+  "dependencies": {
+    "axios": "^1.13.6",
+    "express": "^5.2.1",
+    "multer": "^2.1.1"
+  }
+}
