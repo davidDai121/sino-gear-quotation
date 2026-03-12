@@ -4,7 +4,6 @@ const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
 const { URL } = require('url');
-const puppeteer = require('puppeteer');
 
 const app = express();
 const PORT = process.env.PORT || 8081;
@@ -1569,316 +1568,27 @@ app.get('/api/jyt-car', async (req, res) => {
             return res.status(429).json({ error: "Rate limit exceeded", scope: rl.scope, retry_after_seconds: rl.retryAfterSeconds || 1 });
         }
 
-        const startedAt = Date.now();
-        const logPrefix = `[Puppeteer][${carCode}]`;
-        console.log(`${logPrefix} start link=${link}`);
-        const debugInfo = {
-            car_code: carCode,
-            tried_urls: [],
-            navigations: [],
-            final_url: "",
-            captured_url: "",
-            captured_status: null,
-            error: "",
-            elapsed_ms: 0
+        const apiUrl = `https://inner-h5.jytche.com/inner-api/v2/car/${carCode}`;
+        const accessToken = process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN;
+        const headers = {
+            "Access-Token": accessToken,
+            "from-type": "h5",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
         };
 
-        let data;
-        let browser;
+        let response;
         try {
-            console.log(`${logPrefix} launching browser`);
-            browser = await puppeteer.launch({
-                headless: "new",
-                args: [
-                    '--no-sandbox', 
-                    '--disable-setuid-sandbox', 
-                    '--disable-dev-shm-usage', 
-                    '--window-size=1280,1024',
-                    '--disable-blink-features=AutomationControlled' // Hide webdriver
-                ]
+            response = await axios.get(apiUrl, {
+                headers,
+                timeout: 15000,
+                validateStatus: () => true
             });
-            const page = await browser.newPage();
-
-            page.setDefaultTimeout(30000);
-            // Simulate iPhone 12 Pro
-            await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
-            await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1');
-
-            // Inject Access-Token into LocalStorage before navigation
-            await page.evaluateOnNewDocument((token) => {
-                try {
-                    localStorage.setItem('Access-Token', token);
-                    localStorage.setItem('token', token);
-                    localStorage.setItem('userInfo', JSON.stringify({ token: token })); // Guessing possible keys
-                } catch (e) {
-                    console.error('Failed to inject token:', e);
-                }
-            }, process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN);
-
-            let capturedData = null;
-            let capturedMeta = null;
-            const isInnerApiUrl = (url) => {
-                return url && typeof url === 'string' && url.includes('/inner-api/v2/');
-            };
-            const isCarApiUrl = (url) => {
-                if (!isInnerApiUrl(url)) return false;
-                if (url.includes(`/car/${carCode}`)) return true;
-                if (url.includes(`car_code=${carCode}`)) return true;
-                return false;
-            };
-
-            page.on('console', (msg) => {
-                const text = msg.text();
-                if (!text) return;
-                console.log(`${logPrefix} console ${msg.type()}: ${text.slice(0, 800)}`);
-            });
-            page.on('pageerror', (err) => {
-                console.log(`${logPrefix} pageerror: ${err?.message || String(err)}`);
-            });
-            page.on('error', (err) => {
-                console.log(`${logPrefix} error: ${err?.message || String(err)}`);
-            });
-            page.on('requestfailed', (request) => {
-                const url = request.url();
-                const failure = request.failure();
-                const reason = failure?.errorText || 'unknown';
-                if (isInnerApiUrl(url) || url.includes('jytche.com')) {
-                    console.log(`${logPrefix} requestfailed: ${reason} ${url}`);
-                }
-            });
-            await page.setRequestInterception(true);
-            page.on('request', (request) => {
-                const url = request.url();
-                if (isInnerApiUrl(url)) {
-                    const headers = {
-                        ...request.headers(),
-                        'Access-Token': process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN,
-                        'from-type': 'h5'
-                    };
-                    console.log(`${logPrefix} injecting headers for api ${url}`);
-                    try {
-                        request.continue({ headers });
-                    } catch (e) {
-                        console.log(`${logPrefix} request.continue error: ${e?.message || String(e)}`);
-                        request.continue();
-                    }
-                    return;
-                }
-                request.continue();
-            });
-            page.on('response', async (response) => {
-                const url = response.url();
-                if (!isInnerApiUrl(url)) return;
-                const status = response.status();
-                console.log(`${logPrefix} api response status=${status} url=${url}`);
-                
-                if (!isCarApiUrl(url)) return; // Only capture data from car api
-
-                try {
-                    const headers = response.headers() || {};
-                    const ct = (headers['content-type'] || headers['Content-Type'] || '').toString();
-                    if (!ct.includes('application/json')) {
-                        const text = await response.text();
-                        console.log(`${logPrefix} api non-json head=${(text || '').slice(0, 300)}`);
-                        return;
-                    }
-                    const json = await response.json();
-                    if (json && typeof json === 'object') {
-                        capturedData = json;
-                        capturedMeta = { url, status };
-                        debugInfo.captured_url = url;
-                        debugInfo.captured_status = status;
-                        console.log(`${logPrefix} captured api keys=${Object.keys(json).slice(0, 30).join(',')}`);
-                    }
-                } catch (e) {
-                    console.log(`${logPrefix} api parse error: ${e?.message || String(e)}`);
-                }
-            });
-
-            const candidateUrls = [];
-            const normalizedLink = (link || '').toString().trim();
-            if (/^https?:\/\//i.test(normalizedLink)) candidateUrls.push(normalizedLink);
-            candidateUrls.push(`https://h5.jytche.com/#/car-detail?car_code=${carCode}`);
-            candidateUrls.push(`https://h5.jytche.com/car-detail?car_code=${carCode}`);
-            candidateUrls.push(`https://h5.jytche.com/car-detail?car_code=${carCode}&from=share`);
-
-            for (const targetUrl of candidateUrls) {
-                if (capturedData) break;
-                debugInfo.tried_urls.push(targetUrl);
-                console.log(`${logPrefix} goto ${targetUrl}`);
-                let navResponse = null;
-                try {
-                    navResponse = await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                } catch (e) {
-                    console.log(`${logPrefix} goto error: ${e?.message || String(e)}`);
-                }
-                const navStatus = navResponse ? navResponse.status() : null;
-                const finalUrl = page.url();
-                debugInfo.navigations.push({ url: targetUrl, status: navStatus, final_url: finalUrl });
-                console.log(`${logPrefix} goto done status=${navStatus} finalUrl=${finalUrl}`);
-                try {
-                    await page.evaluate((token) => { window.__ACCESS_TOKEN_OVERRIDE__ = token; }, (process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN));
-                } catch (_) {}
-
-                try {
-                    await page.waitForResponse((r) => isCarApiUrl(r.url()), { timeout: 15000 });
-                } catch (_) {
-                    console.log(`${logPrefix} waitForResponse timeout (15s)`);
-                }
-
-                try {
-                    await page.evaluate(async () => {
-                        await new Promise((resolve) => {
-                            let totalHeight = 0;
-                            const distance = 120;
-                            const timer = setInterval(() => {
-                                const scrollHeight = document.body.scrollHeight;
-                                window.scrollBy(0, distance);
-                                totalHeight += distance;
-                                if (totalHeight >= scrollHeight || totalHeight > 2400) {
-                                    clearInterval(timer);
-                                    resolve();
-                                }
-                            }, 120);
-                        });
-                    });
-                } catch (e) {
-                    console.log(`${logPrefix} scroll warning: ${e?.message || String(e)}`);
-                }
-
-                const delay = Math.floor(Math.random() * 3000) + 3000;
-                console.log(`${logPrefix} dwell ${delay}ms`);
-                await new Promise((r) => setTimeout(r, delay));
-            }
-
-            try {
-                debugInfo.final_url = page.url();
-            } catch (_) {}
-
-            if (!capturedData) {
-                console.log(`${logPrefix} api not captured, fallback fetch in page context`);
-                const fallback = await page.evaluate(async (cCode) => {
-                    try {
-                        const url = `https://inner-h5.jytche.com/inner-api/v2/car/${cCode}`;
-                        const res = await fetch(url, {
-                            method: 'GET',
-                            credentials: 'include',
-                            headers: { 
-                                "from-type": "h5",
-                                "Access-Token": (typeof window !== 'undefined' && window.__ACCESS_TOKEN_OVERRIDE__) || ""
-                            },
-                        });
-                        const text = await res.text();
-                        let json = null;
-                        try { json = JSON.parse(text); } catch (_) {}
-                        return {
-                            url,
-                            ok: res.ok,
-                            status: res.status,
-                            json,
-                            textHead: (text || '').slice(0, 600)
-                        };
-                    } catch (e) {
-                        return { ok: false, status: 0, url: '', json: null, textHead: String(e?.message || e) };
-                    }
-                }, carCode);
-                console.log(`${logPrefix} fallback status=${fallback?.status} ok=${fallback?.ok} head=${(fallback?.textHead || '').slice(0, 300)}`);
-                if (fallback && fallback.ok && fallback.json && typeof fallback.json === 'object') {
-                    capturedData = fallback.json;
-                    capturedMeta = { url: fallback.url, status: fallback.status };
-                    debugInfo.captured_url = fallback.url;
-                    debugInfo.captured_status = fallback.status;
-                }
-            }
-            
-            // DOM Scraping fallback (Ultimate fallback if API interception and fetch fail)
-            if (!capturedData) {
-                console.log(`${logPrefix} DOM scraping fallback triggered`);
-                const scrapedData = await page.evaluate(() => {
-                    const getText = (sel) => document.querySelector(sel)?.innerText?.trim() || '';
-                    const getSrc = (sel) => document.querySelector(sel)?.src || '';
-                    
-                    // Try to find price
-                    let price = "0";
-                    // Try different price selectors observed in similar sites
-                    const priceEl = document.querySelector('.price') || document.querySelector('[class*="price"]');
-                    if (priceEl) {
-                        const match = priceEl.innerText.match(/(\d+(?:\.\d+)?)/);
-                        if (match) price = match[1];
-                    }
-
-                    // Try to find title
-                    const name = getText('h1') || getText('.title') || getText('[class*="title"]') || document.title;
-                    
-                    // Try to find images
-                    const images = [];
-                    document.querySelectorAll('img').forEach(img => {
-                        if (img.src && !img.src.includes('avatar') && !img.src.includes('icon') && img.width > 200) {
-                            images.push({ filename: img.src });
-                        }
-                    });
-
-                    // If we found at least a name, return a partial object
-                    if (name) {
-                        return {
-                            name: name,
-                            price: price,
-                            mileage: "N/A", // Hard to parse without specific selector
-                            plate_date: "N/A",
-                            description: getText('.description') || getText('[class*="desc"]'),
-                            images: images,
-                            // Add flag to indicate scraped data
-                            _is_scraped: true
-                        };
-                    }
-                    return null;
-                });
-
-                if (scrapedData) {
-                    console.log(`${logPrefix} DOM scraping success: ${scrapedData.name}`);
-                    capturedData = scrapedData;
-                    debugInfo.dom_scraped = true;
-                } else {
-                     console.log(`${logPrefix} DOM scraping failed`);
-                }
-            }
-
-            data = capturedData;
-            if (data) {
-                console.log(`${logPrefix} success source=${debugInfo.dom_scraped ? 'dom' : (capturedMeta?.url || 'unknown')} elapsedMs=${Date.now() - startedAt}`);
-            } else {
-                console.log(`${logPrefix} no data captured elapsedMs=${Date.now() - startedAt}`);
-            }
-
-        } catch (err) {
-            const message = err?.message || String(err);
-            debugInfo.error = message;
-            console.log(`${logPrefix} error: ${message}`);
-            // Screenshot on error
-            try {
-                if (page) {
-                    const errorScreenshotPath = path.join(__dirname, 'public', 'debug_error.png');
-                    await page.screenshot({ path: errorScreenshotPath, fullPage: true });
-                    console.log(`${logPrefix} error screenshot saved to ${errorScreenshotPath}`);
-                }
-            } catch (e) {
-                console.log(`${logPrefix} failed to take error screenshot: ${e.message}`);
-            }
-        } finally {
-            debugInfo.elapsed_ms = Date.now() - startedAt;
-            // Also take a final screenshot always for debugging
-            try {
-                if (page && !page.isClosed()) {
-                     const finalScreenshotPath = path.join(__dirname, 'public', 'debug_last_run.png');
-                     await page.screenshot({ path: finalScreenshotPath, fullPage: true });
-                     console.log(`${logPrefix} final screenshot saved to ${finalScreenshotPath}`);
-                }
-            } catch (e) {}
-
-            if (browser) await browser.close();
+        } catch (_) {
+            return res.status(502).json({ error: "Failed to fetch data from JYT" });
         }
+        if (response.status !== 200) return res.status(response.status).json({ error: "Failed to fetch data from JYT" });
 
-        if (!data) return res.status(502).json({ error: "Failed to fetch data from JYT (Puppeteer)", car_code: carCode, debug: debugInfo });
+        const data = response.data;
         
         const usdCnyRateOverride = Number.parseFloat(req.query.usd_cny_rate);
         const fobMarkupCnyOverride = Number.parseFloat(req.query.fob_markup_cny);

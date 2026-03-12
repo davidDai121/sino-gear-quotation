@@ -421,7 +421,10 @@ async function fetchJytData() {
         const res = await fetch(`/api/jyt-car?${params.toString()}`);
         const data = await res.json();
         
-        if (!res.ok) throw new Error(data.error || "Failed to fetch");
+        if (!res.ok) {
+            const debugText = data && data.debug ? `\n\nDEBUG:\n${JSON.stringify(data.debug, null, 2)}` : '';
+            throw new Error((data.error || "Failed to fetch") + debugText);
+        }
 
         const titleEl = document.querySelector('.main-title');
         if (titleEl) titleEl.innerText = data.name;
@@ -532,6 +535,13 @@ async function downloadHTML() {
         const clone = quotationEl.cloneNode(true);
         clone.querySelectorAll('.delete-btn, .add-btn-container, .add-label-btn, .toolbar').forEach((el) => el.remove());
         clone.querySelectorAll('[onclick]').forEach((el) => el.removeAttribute('onclick'));
+        clone.querySelectorAll('[contenteditable]').forEach((el) => el.removeAttribute('contenteditable'));
+        
+        // Add click viewer to images
+        clone.querySelectorAll('.img-container img').forEach(img => {
+            img.style.cursor = 'pointer';
+            img.setAttribute('onclick', 'showModal(this.src)');
+        });
 
         const toDataUrl = async (url) => {
             const res = await fetch(url, { cache: 'no-store' });
@@ -572,10 +582,60 @@ async function downloadHTML() {
   <style>${cssText}</style>
   <style>
     body { background: #ffffff; padding: 20px; }
+    /* Modal Styles */
+    .modal-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.85);
+        z-index: 10000;
+        justify-content: center;
+        align-items: center;
+        cursor: zoom-out;
+    }
+    .modal-overlay.active {
+        display: flex;
+    }
+    .modal-img {
+        max-width: 90%;
+        max-height: 90%;
+        object-fit: contain;
+        box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        cursor: default;
+    }
   </style>
 </head>
 <body class="exporting">
 ${clone.outerHTML}
+
+<!-- Image Viewer Modal -->
+<div id="imageModal" class="modal-overlay" onclick="closeModal()">
+    <img id="modalImg" class="modal-img" src="" onclick="event.stopPropagation()">
+</div>
+
+<script>
+    function showModal(src) {
+        const modal = document.getElementById('imageModal');
+        const img = document.getElementById('modalImg');
+        img.src = src;
+        modal.classList.add('active');
+        document.body.style.overflow = 'hidden'; // Prevent scrolling
+    }
+
+    function closeModal() {
+        const modal = document.getElementById('imageModal');
+        modal.classList.remove('active');
+        document.body.style.overflow = ''; // Restore scrolling
+    }
+    
+    // Close on Escape key
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeModal();
+    });
+</script>
 </body>
 </html>`;
 
