@@ -1285,7 +1285,16 @@ function buildModelDict(source) {
     for (const [k, v] of Object.entries(source || {})) {
         if (v && typeof v === 'object' && !Array.isArray(v)) {
             for (const [mk, mv] of Object.entries(v)) {
-                if (typeof mv === 'string') result[mk] = mv;
+                if (typeof mv !== 'string') continue;
+                const brand = (k || '').toString();
+                const modelKey = (mk || '').toString();
+                if (!brand || !modelKey) continue;
+
+                const combined = `${brand}${modelKey}`;
+                const hasCjk = /[\u3400-\u9FFF]/.test(modelKey);
+
+                if (hasCjk) result[modelKey] = mv;
+                result[combined] = mv;
             }
             continue;
         }
