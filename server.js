@@ -1424,11 +1424,70 @@ function formatUsd(usd) {
     return `$${Math.round(usd).toLocaleString()}`;
 }
 
+function pickFirstString(value) {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) {
+        const parts = value
+            .map((v) => (typeof v === 'string' ? v.trim() : ''))
+            .filter(Boolean);
+        if (parts.length) return parts.join('，');
+    }
+    if (value && typeof value === 'object') {
+        for (const v of Object.values(value)) {
+            const s = pickFirstString(v);
+            if (typeof s === 'string' && s.trim()) return s;
+        }
+    }
+    return '';
+}
+
+function pickBestDescription(data) {
+    const candidates = [];
+    const add = (v) => {
+        const s = pickFirstString(v);
+        const t = (s || '').toString().trim();
+        if (t) candidates.push(t);
+    };
+
+    add(data?.description);
+    add(data?.description_label);
+    add(data?.desc);
+    add(data?.desc_label);
+    add(data?.car_desc);
+    add(data?.carDesc);
+    add(data?.car_desc_label);
+    add(data?.detail_desc);
+    add(data?.detailDesc);
+    add(data?.remark);
+    add(data?.remarks);
+    add(data?.memo);
+    add(data?.comment);
+    add(data?.selling_points);
+    add(data?.sellingPoints);
+    add(data?.highlights);
+    add(data?.tags);
+    add(data?.tag_list);
+    add(data?.tagList);
+
+    const seen = new Set();
+    const unique = candidates.filter((c) => {
+        if (seen.has(c)) return false;
+        seen.add(c);
+        return true;
+    });
+
+    const preferred = unique
+        .filter((s) => /[\u3400-\u9FFF]/.test(s) || /[a-zA-Z]/.test(s))
+        .sort((a, b) => b.length - a.length)[0];
+    const best = preferred || unique.sort((a, b) => b.length - a.length)[0] || '';
+    return best.length > 6000 ? best.slice(0, 6000) : best;
+}
+
 function translateJytData(data, options = {}) {
     const translated = {};
     
     const nameRaw = (data.name || "Unknown Model").toString();
-    const descriptionRaw = (data.description || "").toString();
+    const descriptionRaw = pickBestDescription(data);
     translated.name_raw = nameRaw;
     translated.description_raw = descriptionRaw;
     translated.name = applyBrandModelDict(nameRaw);
