@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "Sino Gear Quotation Generator",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js",
-    "prod": "node server.js",
+    "start": "PUPPETEER_CACHE_DIR=./node_modules/.cache/puppeteer node server.js",
+    "dev": "PUPPETEER_CACHE_DIR=./node_modules/.cache/puppeteer nodemon server.js",
+    "prod": "PUPPETEER_CACHE_DIR=./node_modules/.cache/puppeteer node server.js",
     "postinstall": "PUPPETEER_CACHE_DIR=./node_modules/.cache/puppeteer npx puppeteer browsers install chrome"
   },
   "keywords": [],

@@ -1585,6 +1585,7 @@ app.get('/api/jyt-car', async (req, res) => {
 
         let data;
         let browser;
+        let page;
         try {
             console.log(`${logPrefix} launching browser`);
             browser = await puppeteer.launch({
@@ -1597,7 +1598,7 @@ app.get('/api/jyt-car', async (req, res) => {
                     '--disable-blink-features=AutomationControlled' // Hide webdriver
                 ]
             });
-            const page = await browser.newPage();
+            page = await browser.newPage();
 
             page.setDefaultTimeout(30000);
             // Simulate iPhone 12 Pro
