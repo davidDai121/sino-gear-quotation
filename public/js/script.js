@@ -581,7 +581,7 @@ async function downloadHTML() {
   <title>${titleText}</title>
   <style>${cssText}</style>
   <style>
-    body { background: #ffffff; padding: 20px; }
+    body { background: #ffffff; margin: 0; }
     /* Modal Styles */
     .modal-overlay {
         display: none;

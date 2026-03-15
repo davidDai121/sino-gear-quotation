@@ -11,23 +11,31 @@
 <body>
 
     <div class="toolbar">
-        <div class="jyt-import" style="display: flex; gap: 10px; align-items: center; border-right: 1px solid #ccc; padding-right: 15px; margin-right: 15px;">
-            <input type="text" id="jyt-link" placeholder="Paste JYT Link here (金鱼塘链接)" style="padding: 8px; width: 250px; border-radius: 4px; border: 1px solid #ddd;">
-            <button class="btn" onclick="fetchJytData()" style="background-color: #4CAF50;">Fetch & Translate</button>
-            <span style="font-size: 12px; color: #666;">USD/CNY</span>
-            <input type="number" id="usd-cny-rate" value="6.8" step="0.01" style="padding: 8px; width: 90px; border-radius: 4px; border: 1px solid #ddd;">
-            <span style="font-size: 12px; color: #666;">FOB +CNY</span>
-            <input type="number" id="fob-markup-cny" value="20000" step="1" style="padding: 8px; width: 110px; border-radius: 4px; border: 1px solid #ddd;">
+        <div class="jyt-import">
+            <input type="text" id="jyt-link" placeholder="Paste JYT Link here (金鱼塘链接)">
+            <button class="btn" onclick="fetchJytData()">Fetch & Translate</button>
+            <div class="rate-inputs">
+                <div class="rate-group">
+                    <span>USD/CNY</span>
+                    <input type="number" id="usd-cny-rate" value="6.8" step="0.01">
+                </div>
+                <div class="rate-group">
+                    <span>FOB +CNY</span>
+                    <input type="number" id="fob-markup-cny" value="20000" step="1">
+                </div>
+            </div>
         </div>
         
-        <button class="btn" onclick="exportPDF()">Export PDF</button>
-        <button class="btn" onclick="downloadHTML()" style="background-color: #2196F3;">Download HTML</button>
-        
-        <div class="color-control">
-            <label for="color-picker" style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
-                <i class="fas fa-palette"></i> Color
-            </label>
-            <input type="color" id="color-picker" value="#d81e06">
+        <div class="action-buttons">
+            <button class="btn" onclick="exportPDF()">Export PDF</button>
+            <button class="btn" onclick="downloadHTML()" style="background-color: #2196F3;">Download HTML</button>
+            
+            <div class="color-control">
+                <label for="color-picker">
+                    <i class="fas fa-palette"></i> Color
+                </label>
+                <input type="color" id="color-picker" value="#d81e06">
+            </div>
         </div>
     </div>
 
