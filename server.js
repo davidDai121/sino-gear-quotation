@@ -1650,12 +1650,25 @@ app.get('/api/jyt-car', async (req, res) => {
             await page.setRequestInterception(true);
             page.on('request', (request) => {
                 const url = request.url();
+                
+                // Block analytics and tracking requests to speed up
+                if (url.includes('google-analytics') || url.includes('baidu.com')) {
+                    request.abort();
+                    return;
+                }
+
                 if (isInnerApiUrl(url)) {
                     const headers = {
                         ...request.headers(),
                         'Access-Token': process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN,
-                        'from-type': 'h5'
+                        'from-type': 'h5',
+                        // Fix CORS issue by mimicking the exact origin/referer
+                        'Origin': 'https://h5.jytche.com',
+                        'Referer': 'https://h5.jytche.com/'
                     };
+                    
+                    // JYT api uses OPTIONS preflight, we need to let it pass without modification
+                    // or handle it properly. But for page requests, it's better to just inject headers
                     console.log(`${logPrefix} injecting headers for api ${url}`);
                     try {
                         request.continue({ headers });
@@ -1763,7 +1776,8 @@ app.get('/api/jyt-car', async (req, res) => {
                         const url = `https://inner-h5.jytche.com/inner-api/v2/car/${cCode}`;
                         const res = await fetch(url, {
                             method: 'GET',
-                            credentials: 'include',
+                            // credentials: 'omit' to prevent CORS preflight issues sometimes
+                            credentials: 'omit',
                             headers: { 
                                 "from-type": "h5",
                                 "Access-Token": (typeof window !== 'undefined' && window.__ACCESS_TOKEN_OVERRIDE__) || ""
