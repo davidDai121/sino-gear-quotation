@@ -1,2 +1,4 @@
 node_modules
 .DS_Store
+public/debug_last_run.png
+public/debug_error.png

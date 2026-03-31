@@ -9,9 +9,12 @@ const puppeteer = require('puppeteer');
 const app = express();
 const PORT = process.env.PORT || 8081;
 
-const DEFAULT_JYT_ACCESS_TOKEN = "d6fc3ebb32c62d4d5154dcc08dd87a60";
+const DEFAULT_JYT_ACCESS_TOKEN = "d6fc3ebbcc8ab32664937a2db6059266";
 const DEFAULT_USD_CNY_RATE = 6.8;
 const DEFAULT_FOB_MARKUP_CNY = 20000;
+
+app.use(express.json({ limit: '50kb' }));
+app.use(express.urlencoded({ extended: false, limit: '50kb' }));
 
 function parsePositiveInt(value, fallback) {
     const n = Number.parseInt((value ?? '').toString(), 10);
@@ -21,6 +24,24 @@ function parsePositiveInt(value, fallback) {
 function parseNonNegativeInt(value, fallback) {
     const n = Number.parseInt((value ?? '').toString(), 10);
     return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+let runtimeJytAccessToken = null;
+
+function normalizeJytAccessToken(token) {
+    const t = (token ?? '').toString().trim();
+    return t ? t : null;
+}
+
+function getJytAccessToken() {
+    return runtimeJytAccessToken || process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN;
+}
+
+function maskToken(token) {
+    const t = (token ?? '').toString();
+    if (!t) return '';
+    if (t.length <= 8) return `${t.slice(0, 2)}****${t.slice(-2)}`;
+    return `${t.slice(0, 4)}****${t.slice(-4)}`;
 }
 
 const JYT_LIMITS = {
@@ -1614,7 +1635,7 @@ app.get('/api/jyt-car', async (req, res) => {
                 } catch (e) {
                     console.error('Failed to inject token:', e);
                 }
-            }, process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN);
+            }, getJytAccessToken());
 
             let capturedData = null;
             let capturedMeta = null;
@@ -1650,8 +1671,7 @@ app.get('/api/jyt-car', async (req, res) => {
             await page.setRequestInterception(true);
             page.on('request', (request) => {
                 const url = request.url();
-                
-                // Block analytics and tracking requests to speed up
+
                 if (url.includes('google-analytics') || url.includes('baidu.com')) {
                     request.abort();
                     return;
@@ -1660,15 +1680,11 @@ app.get('/api/jyt-car', async (req, res) => {
                 if (isInnerApiUrl(url)) {
                     const headers = {
                         ...request.headers(),
-                        'Access-Token': process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN,
+                        'Access-Token': getJytAccessToken(),
                         'from-type': 'h5',
-                        // Fix CORS issue by mimicking the exact origin/referer
                         'Origin': 'https://h5.jytche.com',
                         'Referer': 'https://h5.jytche.com/'
                     };
-                    
-                    // JYT api uses OPTIONS preflight, we need to let it pass without modification
-                    // or handle it properly. But for page requests, it's better to just inject headers
                     console.log(`${logPrefix} injecting headers for api ${url}`);
                     try {
                         request.continue({ headers });
@@ -1731,7 +1747,7 @@ app.get('/api/jyt-car', async (req, res) => {
                 debugInfo.navigations.push({ url: targetUrl, status: navStatus, final_url: finalUrl });
                 console.log(`${logPrefix} goto done status=${navStatus} finalUrl=${finalUrl}`);
                 try {
-                    await page.evaluate((token) => { window.__ACCESS_TOKEN_OVERRIDE__ = token; }, (process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN));
+                    await page.evaluate((token) => { window.__ACCESS_TOKEN_OVERRIDE__ = token; }, getJytAccessToken());
                 } catch (_) {}
 
                 try {
@@ -1776,7 +1792,6 @@ app.get('/api/jyt-car', async (req, res) => {
                         const url = `https://inner-h5.jytche.com/inner-api/v2/car/${cCode}`;
                         const res = await fetch(url, {
                             method: 'GET',
-                            // credentials: 'omit' to prevent CORS preflight issues sometimes
                             credentials: 'omit',
                             headers: { 
                                 "from-type": "h5",
@@ -2005,6 +2020,113 @@ app.get('/proxy-image', async (req, res) => {
         console.error('Proxy error:', error.message, 'URL:', imageUrl);
         res.redirect(imageUrl); 
     }
+});
+
+function isAdminAuthorized(req) {
+    const adminKey = (process.env.ADMIN_KEY || '').toString();
+    if (!adminKey) return false;
+    const candidate = (
+        req.get('x-admin-key') ||
+        req.query.key ||
+        req.body?.key ||
+        ''
+    ).toString();
+    return candidate === adminKey;
+}
+
+app.get('/admin', (req, res) => {
+    if (!(process.env.ADMIN_KEY || '').toString()) return res.status(404).send('Not Found');
+    res.type('html').send(`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin - JYT Token</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 24px; }
+    .box { max-width: 720px; margin: 0 auto; }
+    label { display:block; margin: 12px 0 6px; font-weight: 600; }
+    input { width: 100%; padding: 10px 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 8px; }
+    button { margin-top: 14px; padding: 10px 14px; font-size: 16px; border: 0; border-radius: 8px; background: #111; color: #fff; cursor: pointer; }
+    pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow: auto; }
+    .row { display:flex; gap: 12px; }
+    .row > div { flex: 1; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>JYT Access Token</h2>
+    <div class="row">
+      <div>
+        <label>ADMIN_KEY</label>
+        <input id="adminKey" type="password" autocomplete="off" />
+      </div>
+      <div>
+        <label>JYT_ACCESS_TOKEN</label>
+        <input id="token" type="password" autocomplete="off" />
+      </div>
+    </div>
+    <button id="saveBtn">保存到当前服务</button>
+    <button id="statusBtn" style="margin-left: 10px; background:#444;">查看状态</button>
+    <pre id="out"></pre>
+  </div>
+  <script>
+    const out = document.getElementById('out');
+    const adminKeyEl = document.getElementById('adminKey');
+    const tokenEl = document.getElementById('token');
+    const saveBtn = document.getElementById('saveBtn');
+    const statusBtn = document.getElementById('statusBtn');
+
+    async function api(path, body) {
+      const key = adminKeyEl.value || '';
+      const res = await fetch(path, {
+        method: body ? 'POST' : 'GET',
+        headers: { 'Content-Type': 'application/json', 'x-admin-key': key },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const text = await res.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch (_) {}
+      return { ok: res.ok, status: res.status, json, text };
+    }
+
+    saveBtn.addEventListener('click', async () => {
+      const token = tokenEl.value || '';
+      const r = await api('/api/admin/jyt-token', { token });
+      out.textContent = JSON.stringify(r.json || { status: r.status, text: r.text }, null, 2);
+    });
+
+    statusBtn.addEventListener('click', async () => {
+      const r = await api('/api/admin/jyt-token');
+      out.textContent = JSON.stringify(r.json || { status: r.status, text: r.text }, null, 2);
+    });
+  </script>
+</body>
+</html>`);
+});
+
+app.get('/api/admin/jyt-token', (req, res) => {
+    if (!isAdminAuthorized(req)) {
+        if (!(process.env.ADMIN_KEY || '').toString()) return res.status(404).json({ error: 'Not Found' });
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const token = getJytAccessToken();
+    res.json({
+        hasToken: Boolean(token),
+        masked: maskToken(token),
+        source: runtimeJytAccessToken ? 'runtime' : (process.env.JYT_ACCESS_TOKEN ? 'env' : 'default')
+    });
+});
+
+app.post('/api/admin/jyt-token', (req, res) => {
+    if (!isAdminAuthorized(req)) {
+        if (!(process.env.ADMIN_KEY || '').toString()) return res.status(404).json({ error: 'Not Found' });
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const token = normalizeJytAccessToken(req.body?.token);
+    if (!token) return res.status(400).json({ error: 'token required' });
+    runtimeJytAccessToken = token;
+    res.json({ ok: true, masked: maskToken(token) });
 });
 
 // Start server
