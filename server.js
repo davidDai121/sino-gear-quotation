@@ -13,6 +13,71 @@ const DEFAULT_JYT_ACCESS_TOKEN = "d6fc3ebbcc8ab32664937a2db6059266";
 const DEFAULT_USD_CNY_RATE = 6.8;
 const DEFAULT_FOB_MARKUP_CNY = 20000;
 
+// Chromium flags tuned for 512MB Render free tier. Every bit counts.
+// NOTE: --single-process is NOT set here — it saves memory but causes navigation
+// hangs on JS-heavy SPAs (which JYT is). The mutex is the real OOM protection.
+const LOW_MEM_CHROMIUM_ARGS = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--disable-extensions',
+    '--disable-background-networking',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+    '--disable-ipc-flooding-protection',
+    '--disable-default-apps',
+    '--disable-sync',
+    '--disable-breakpad',
+    '--disable-component-extensions-with-background-pages',
+    '--mute-audio',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--hide-scrollbars',
+    '--disable-blink-features=AutomationControlled'
+];
+
+async function launchPuppeteerBrowser(extraArgs = []) {
+    return puppeteer.launch({
+        headless: 'new',
+        args: [...LOW_MEM_CHROMIUM_ARGS, ...extraArgs],
+        // Let Chromium figure out executable; pipe over WebSocket saves a bit of RAM too
+        pipe: false
+    });
+}
+
+// Mutex: serialize all Puppeteer work so two Chromium instances never run concurrently
+// (two simultaneous browsers ~= 400-600MB → OOM on 512MB free tier).
+const puppeteerWaiters = [];
+let puppeteerBusy = false;
+
+function acquirePuppeteerSlot(label) {
+    if (!puppeteerBusy) {
+        puppeteerBusy = true;
+        return Promise.resolve();
+    }
+    const enqueuedAt = Date.now();
+    console.log(`[puppeteer-mutex] ${label} queued (position ${puppeteerWaiters.length + 1})`);
+    return new Promise(resolve => {
+        puppeteerWaiters.push({ label, resolve, enqueuedAt });
+    });
+}
+
+function releasePuppeteerSlot() {
+    const next = puppeteerWaiters.shift();
+    if (next) {
+        const waitedMs = Date.now() - next.enqueuedAt;
+        console.log(`[puppeteer-mutex] ${next.label} resumed after ${waitedMs}ms`);
+        setImmediate(() => next.resolve()); // puppeteerBusy stays true for the next holder
+    } else {
+        puppeteerBusy = false;
+        if (global.gc) try { global.gc(); } catch (_) {}
+    }
+}
+
 app.use(express.json({ limit: '50kb' }));
 app.use(express.urlencoded({ extended: false, limit: '50kb' }));
 
@@ -1775,18 +1840,10 @@ app.get('/api/jyt-car', async (req, res) => {
         let data;
         let browser;
         let page;
+        await acquirePuppeteerSlot('jyt-car:' + carCode);
         try {
             console.log(`${logPrefix} launching browser`);
-            browser = await puppeteer.launch({
-                headless: "new",
-                args: [
-                    '--no-sandbox', 
-                    '--disable-setuid-sandbox', 
-                    '--disable-dev-shm-usage', 
-                    '--window-size=1280,1024',
-                    '--disable-blink-features=AutomationControlled' // Hide webdriver
-                ]
-            });
+            browser = await launchPuppeteerBrowser(['--window-size=1280,1024']);
             page = await browser.newPage();
 
             page.setDefaultTimeout(30000);
@@ -2053,28 +2110,35 @@ app.get('/api/jyt-car', async (req, res) => {
             const message = err?.message || String(err);
             debugInfo.error = message;
             console.log(`${logPrefix} error: ${message}`);
-            // Screenshot on error
-            try {
-                if (page) {
-                    const errorScreenshotPath = path.join(__dirname, 'public', 'debug_error.png');
-                    await page.screenshot({ path: errorScreenshotPath, fullPage: true });
-                    console.log(`${logPrefix} error screenshot saved to ${errorScreenshotPath}`);
+            // Screenshot on error (opt-in — costs RAM right when we're close to OOM)
+            if (process.env.DEBUG_SCREENSHOTS === '1') {
+                try {
+                    if (page) {
+                        const errorScreenshotPath = path.join(__dirname, 'public', 'debug_error.png');
+                        await page.screenshot({ path: errorScreenshotPath, fullPage: true });
+                        console.log(`${logPrefix} error screenshot saved to ${errorScreenshotPath}`);
+                    }
+                } catch (e) {
+                    console.log(`${logPrefix} failed to take error screenshot: ${e.message}`);
                 }
-            } catch (e) {
-                console.log(`${logPrefix} failed to take error screenshot: ${e.message}`);
             }
         } finally {
             debugInfo.elapsed_ms = Date.now() - startedAt;
-            // Also take a final screenshot always for debugging
-            try {
-                if (page && !page.isClosed()) {
-                     const finalScreenshotPath = path.join(__dirname, 'public', 'debug_last_run.png');
-                     await page.screenshot({ path: finalScreenshotPath, fullPage: true });
-                     console.log(`${logPrefix} final screenshot saved to ${finalScreenshotPath}`);
-                }
-            } catch (e) {}
+            // Skip the "always final screenshot" on low-memory hosts — costs 20-40MB of
+            // renderer activity right before shutdown and is only useful for debugging.
+            if (process.env.DEBUG_SCREENSHOTS === '1') {
+                try {
+                    if (page && !page.isClosed()) {
+                        const finalScreenshotPath = path.join(__dirname, 'public', 'debug_last_run.png');
+                        await page.screenshot({ path: finalScreenshotPath, fullPage: true });
+                        console.log(`${logPrefix} final screenshot saved to ${finalScreenshotPath}`);
+                    }
+                } catch (e) {}
+            }
 
-            if (browser) await browser.close();
+            try { if (page && !page.isClosed()) await page.close(); } catch (_) {}
+            try { if (browser) await browser.close(); } catch (_) {}
+            releasePuppeteerSlot();
         }
 
         if (!data) {
@@ -2227,13 +2291,12 @@ ${html}
 </html>`;
 
     let browser = null;
+    let page = null;
     const startedAt = Date.now();
+    await acquirePuppeteerSlot('pdf');
     try {
-        browser = await puppeteer.launch({
-            headless: 'new',
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-        });
-        const page = await browser.newPage();
+        browser = await launchPuppeteerBrowser();
+        page = await browser.newPage();
         await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 2 });
         await page.setContent(fullHtml, { waitUntil: 'networkidle0', timeout: 30000 });
 
@@ -2265,10 +2328,28 @@ ${html}
         console.error('[pdf] error:', e?.message || e);
         res.status(500).json({ error: 'PDF generation failed', detail: e?.message || String(e) });
     } finally {
-        if (browser) {
-            try { await browser.close(); } catch (_) {}
-        }
+        try { if (page && !page.isClosed()) await page.close(); } catch (_) {}
+        try { if (browser) await browser.close(); } catch (_) {}
+        releasePuppeteerSlot();
     }
+});
+
+// Cheap health/memory endpoint — useful for UptimeRobot pinging AND for us to
+// see whether we're close to the Render 512MB ceiling.
+app.get('/api/health', (req, res) => {
+    const m = process.memoryUsage();
+    const mb = (n) => Math.round(n / 1024 / 1024);
+    res.json({
+        ok: true,
+        uptimeSec: Math.round(process.uptime()),
+        memory: {
+            rss: mb(m.rss) + 'MB',
+            heapUsed: mb(m.heapUsed) + 'MB',
+            heapTotal: mb(m.heapTotal) + 'MB',
+            external: mb(m.external) + 'MB'
+        },
+        puppeteer: { busy: puppeteerBusy, queued: puppeteerWaiters.length }
+    });
 });
 
 function isAdminAuthorized(req) {
@@ -2546,55 +2627,86 @@ app.post('/api/admin/jyt-token', async (req, res) => {
 });
 
 async function testJytToken(token) {
-    if (!token) return { valid: false, reason: 'token 为空' };
+    const logPrefix = `[token-test]`;
+    if (!token) {
+        console.log(`${logPrefix} skipped: token is empty`);
+        return { valid: false, reason: 'token 为空' };
+    }
     const testUrl = 'https://inner-h5.jytche.com/inner-api/v2/car/test_placeholder';
-    const resp = await axios.get(testUrl, {
-        headers: {
-            'Access-Token': token,
-            'from-type': 'h5',
-            'Origin': 'https://h5.jytche.com',
-            'Referer': 'https://h5.jytche.com/',
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-            'Accept': 'application/json, text/plain, */*'
-        },
-        timeout: 10000,
-        validateStatus: () => true
-    });
+    const masked = maskToken(token);
+    const startedAt = Date.now();
+    console.log(`${logPrefix} → GET ${testUrl} with Access-Token=${masked} (len=${token.length})`);
+
+    let resp;
+    try {
+        resp = await axios.get(testUrl, {
+            headers: {
+                'Access-Token': token,
+                'from-type': 'h5',
+                'Origin': 'https://h5.jytche.com',
+                'Referer': 'https://h5.jytche.com/',
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+                'Accept': 'application/json, text/plain, */*'
+            },
+            timeout: 10000,
+            validateStatus: () => true
+        });
+    } catch (e) {
+        const elapsed = Date.now() - startedAt;
+        const kind = e.code || e.name || 'error';
+        console.log(`${logPrefix} ✗ network error after ${elapsed}ms: ${kind} - ${e.message}`);
+        return { valid: false, reason: `网络错误 (${kind}): ${e.message}`, elapsedMs: elapsed };
+    }
+
+    const elapsed = Date.now() - startedAt;
     const status = resp.status;
     const body = resp.data;
+    const bodyPreview = typeof body === 'object' ? JSON.stringify(body).slice(0, 200) : String(body).slice(0, 200);
+    console.log(`${logPrefix} ← HTTP ${status} in ${elapsed}ms, body=${bodyPreview}`);
+
     if (status === 401 || status === 403) {
-        return { valid: false, status, reason: `Token 已失效 (HTTP ${status})`, body };
+        console.log(`${logPrefix} ✗ invalid: HTTP ${status} (auth rejected by JYT)`);
+        return { valid: false, status, reason: `Token 已失效 (HTTP ${status})`, body, elapsedMs: elapsed };
     }
     // JYT sometimes returns 200 with auth error in body
     if (body && typeof body === 'object') {
         const code = body.code ?? body.status ?? body.errcode;
         const msg = (body.msg || body.message || '').toString();
         if (code === 401 || code === 403 || /token|未登录|未授权|过期|无效/i.test(msg)) {
-            return { valid: false, status, reason: `Token 无效: code=${code} msg=${msg}`, body };
+            console.log(`${logPrefix} ✗ invalid: 200 OK but body says code=${code} msg="${msg}"`);
+            return { valid: false, status, reason: `Token 无效: code=${code} msg=${msg}`, body, elapsedMs: elapsed };
         }
     }
-    return { valid: true, status, reason: `Token 有效 (HTTP ${status})`, body };
+    console.log(`${logPrefix} ✓ valid (HTTP ${status})`);
+    return { valid: true, status, reason: `Token 有效 (HTTP ${status})`, body, elapsedMs: elapsed };
 }
 
 // POST with optional body.token: if provided, test that exact token; else test saved
 app.post('/api/admin/jyt-token-test', async (req, res) => {
     if (!isAdminAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
+    const ip = getClientIp(req);
     const provided = normalizeJytAccessToken(req.body?.token);
     const token = provided || getJytAccessToken();
+    const which = provided ? 'input' : 'saved';
+    console.log(`[token-test] POST from ip=${ip} testing=${which} source=${getJytAccessTokenSource()}`);
     try {
         const result = await testJytToken(token);
-        res.json({ ...result, tested: provided ? 'input' : 'saved', masked: maskToken(token) });
+        res.json({ ...result, tested: which, masked: maskToken(token) });
     } catch (e) {
+        console.log(`[token-test] unexpected error: ${e.message}`);
         res.json({ valid: false, reason: `请求失败: ${e.message}` });
     }
 });
 
 app.get('/api/admin/jyt-token-test', async (req, res) => {
     if (!isAdminAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
+    const ip = getClientIp(req);
+    console.log(`[token-test] GET from ip=${ip} testing=saved source=${getJytAccessTokenSource()}`);
     try {
         const result = await testJytToken(getJytAccessToken());
         res.json({ ...result, tested: 'saved' });
     } catch (e) {
+        console.log(`[token-test] unexpected error: ${e.message}`);
         res.json({ valid: false, reason: `请求失败: ${e.message}` });
     }
 });
