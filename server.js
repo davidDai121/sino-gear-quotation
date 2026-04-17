@@ -2361,7 +2361,11 @@ function isAdminAuthorized(req) {
         req.body?.key ||
         ''
     ).toString();
-    return candidate === adminKey;
+    const ok = candidate === adminKey;
+    if (!ok) {
+        console.log(`[admin-auth] ✗ REJECTED ${req.method} ${req.path} from ip=${getClientIp(req)} — ADMIN_KEY env is set (len=${adminKey.length}) but request supplied ${candidate ? `wrong key (len=${candidate.length})` : 'no key'}`);
+    }
+    return ok;
 }
 
 app.get('/admin', (req, res) => {
