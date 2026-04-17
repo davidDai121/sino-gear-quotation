@@ -2407,27 +2407,56 @@ app.get('/admin', (req, res) => {
 
     testBtn.addEventListener('click', async () => {
       testBtn.disabled = true;
-      testBtn.textContent = '测试中...';
       testResult.style.display = 'none';
+
+      // Elapsed-time indicator (Render cold starts can take 30-60s)
+      const startedAt = Date.now();
+      let elapsed = 0;
+      const tick = setInterval(() => {
+        elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        let hint = '';
+        if (elapsed > 30) hint = '（可能是 Render 冷启动，再等等…）';
+        else if (elapsed > 10) hint = '（Render 可能正在唤醒…）';
+        testBtn.textContent = '测试中… ' + elapsed + 's' + hint;
+      }, 500);
+
+      // Client-side abort so the user isn't left hanging forever
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 90000);
+
       try {
-        // Test the value currently in the input field (without saving).
-        // If input is empty, fall back to testing the saved token.
         const inputToken = (tokenEl.value || '').trim();
-        const r = await api('/api/admin/jyt-token-test', inputToken ? { token: inputToken } : {});
-        const j = r.json;
-        if (!r.ok) {
-          showTestResult(false, '请求失败: ' + (j?.error || r.text));
+        const key = adminKeyEl ? (adminKeyEl.value || '') : '';
+        const body = inputToken ? { token: inputToken } : {};
+        const res = await fetch('/api/admin/jyt-token-test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': key },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+        const text = await res.text();
+        let j = null;
+        try { j = JSON.parse(text); } catch (_) {}
+
+        if (!res.ok) {
+          showTestResult(false, '请求失败 (HTTP ' + res.status + '): ' + (j?.error || text.slice(0, 200)));
         } else if (j?.valid) {
           const which = j.tested === 'input' ? '（输入框的 token）' : '（已保存的 token）';
-          showTestResult(true, 'Token 有效 ' + which + ' — HTTP ' + j.status);
+          showTestResult(true, 'Token 有效 ' + which + ' — HTTP ' + j.status + '，用时 ' + elapsed + 's');
         } else {
           const which = j?.tested === 'input' ? '（输入框的 token）' : '（已保存的 token）';
           showTestResult(false, 'Token 无效 ' + which + ': ' + (j?.reason || 'unknown'));
         }
-        out.textContent = JSON.stringify(j || { status: r.status, text: r.text }, null, 2);
+        out.textContent = JSON.stringify(j || { status: res.status, text }, null, 2);
       } catch (e) {
-        showTestResult(false, '网络错误: ' + e.message);
+        if (e.name === 'AbortError') {
+          showTestResult(false, '超时 90 秒仍无响应。JYT 可能不通，或 Render 没唤醒。可以直接点"保存"（保存不依赖 JYT 连通），或再试一次。');
+        } else {
+          showTestResult(false, '网络错误: ' + (e.message || e));
+        }
       } finally {
+        clearTimeout(timeoutId);
+        clearInterval(tick);
         testBtn.disabled = false;
         testBtn.textContent = '测试 Token';
       }
