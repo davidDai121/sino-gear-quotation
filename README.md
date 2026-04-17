@@ -21,28 +21,44 @@ Admin page: http://localhost:8081/admin (set a fresh JYT token captured via Prox
 
 ## JYT Token — How Storage Works
 
-The JYT Access-Token is bound to your WeChat identity and can only be obtained by opening JYT in WeChat and capturing the header (Proxyman, Charles, etc.). The server loads it from these sources, in priority order:
+The JYT Access-Token is bound to your WeChat identity and can only be obtained by opening JYT in WeChat and capturing the header (Proxyman, Charles, etc.). There is no anonymous/guest endpoint, so the server cannot refresh it on its own.
 
-1. **Upstash Redis** (if `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` are set) — **the only backend that survives deploys on ephemeral hosts like Render free tier**
-2. **Local file** `./data/jyt-token.json` — survives restarts only if the filesystem is persistent (local dev, Render with persistent disk, etc.)
-3. **`JYT_ACCESS_TOKEN`** environment variable — set once via platform dashboard
-4. Hardcoded default (usually expired — last resort)
+The server loads a token from these sources, in priority order:
 
-When you save a token via `/admin`, it's written to Upstash (if configured) **and** the local file.
+1. Runtime memory (set this session via `/admin`)
+2. **Upstash Redis** (if `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` are set)
+3. **Local file** `./data/jyt-token.json` — survives restarts only on persistent filesystems
+4. **`JYT_ACCESS_TOKEN`** env var
+5. Hardcoded `DEFAULT_JYT_ACCESS_TOKEN` in `server.js` (usually expired — last resort)
 
-### Recommended setup for Render (free tier)
+When you save a token via `/admin`, it writes to:
 
-Because Render's free tier has an ephemeral filesystem, use Upstash Redis so `/admin` saves survive restarts/redeploys:
+- Runtime memory (instant effect)
+- GitHub via API (if `GITHUB_TOKEN` is set) — **rewrites the `DEFAULT_JYT_ACCESS_TOKEN` literal in `server.js`, commits, triggers auto-deploy on Render so the new token becomes permanent**
+- Upstash (if configured)
+- Local file
 
-1. Sign up at https://upstash.com (free, GitHub login works)
-2. Create a Redis database (any region, "Free" plan)
-3. In the database's **REST API** tab, copy the `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` values
-4. In Render → your service → **Environment**, add both:
-   - `UPSTASH_REDIS_REST_URL` = `https://xxx.upstash.io`
-   - `UPSTASH_REDIS_REST_TOKEN` = `AXXXxxxxx…`
-5. Redeploy. The `/admin` page will show a green "Upstash Redis 已连接" banner when it's wired up.
+### Recommended setup for Render (free tier) — "edit token on the web, auto-save to code"
 
-After that: capture a token from WeChat/Proxyman → paste at `/admin` → it sticks forever (or until JYT invalidates it).
+The simplest way to have `/admin` saves persist through Render restarts without a separate KV service: let the server commit the new token back to the source file on GitHub. Render redeploys automatically on push.
+
+1. Go to https://github.com/settings/personal-access-tokens/new (fine-grained PAT)
+2. Repository access: **Only select repositories** → pick `davidDai121/sinogear-quotation`
+3. Permissions → Repository permissions → **Contents: Read and write**
+4. Generate, copy the token (starts with `github_pat_...`)
+5. In Render → your service → **Environment**, add:
+   - `GITHUB_TOKEN` = `github_pat_...`
+   - (optional) `GITHUB_REPO` = `davidDai121/sinogear-quotation` (default)
+   - (optional) `GITHUB_BRANCH` = `main` (default)
+6. Save. Render restarts. Open `/admin` — you should see a green banner "GitHub 自动 commit 已启用".
+
+After that: paste a fresh token → click save → server commits + pushes → Render redeploys (1-2 min) → token is now the default. The in-memory value works immediately so you don't have to wait.
+
+**Security note**: the repo is public, so the token is visible in commit history. This is deliberately accepted here because JYT tokens are short-lived; by the time anyone finds it, it's already invalid. If you want to be safer, make the repo private (GitHub settings → Danger Zone → Change visibility).
+
+### Alternative: Upstash Redis
+
+If you prefer a KV approach (doesn't touch git history): sign up at https://upstash.com, create a free Redis DB, copy the REST URL + token, set them in Render env.
 
 ## Optional Environment Variables
 
@@ -51,6 +67,10 @@ After that: capture a token from WeChat/Proxyman → paste at `/admin` → it st
 | `PORT` | HTTP port (default 8081) |
 | `ADMIN_KEY` | If set, `/admin` and `/api/admin/*` require this key via `x-admin-key` header. Leave unset for open access (fine for personal use). |
 | `JYT_ACCESS_TOKEN` | Fallback token when no runtime/upstash/file token is available |
-| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Enables cloud persistence (see above) |
-| `UPSTASH_JYT_KEY` | Redis key to store the token under (default `sinogear:jyt-access-token`) |
+| `GITHUB_TOKEN` | Fine-grained PAT with `contents:write` — enables auto-commit on save |
+| `GITHUB_REPO` | `owner/repo` override (default `davidDai121/sinogear-quotation`) |
+| `GITHUB_BRANCH` | Branch to commit to (default `main`) |
+| `GITHUB_TOKEN_FILE` | File to rewrite (default `server.js`) |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Enables cloud persistence |
+| `UPSTASH_JYT_KEY` | Redis key (default `sinogear:jyt-access-token`) |
 | `JYT_RL_IP_MAX`, `JYT_RL_IP_DAILY_MAX`, `JYT_RL_IP_CAR_MAX` | Rate limits per IP / per car (see `server.js`) |

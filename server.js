@@ -80,6 +80,63 @@ async function upstashSetToken(token) {
     }
 }
 
+// GitHub auto-commit backend: rewrites the DEFAULT_JYT_ACCESS_TOKEN literal
+// in server.js via the GitHub Contents API. On platforms with auto-deploy (Render
+// with a GitHub-linked service), the commit triggers a redeploy so the token
+// becomes the persistent default on the next cold start.
+//
+// Requires GITHUB_TOKEN (PAT with `contents:write` on this repo). Repo and
+// branch are auto-detected from env / defaults.
+const GH_TOKEN = process.env.GITHUB_TOKEN || '';
+const GH_REPO = process.env.GITHUB_REPO || 'davidDai121/sinogear-quotation';
+const GH_BRANCH = process.env.GITHUB_BRANCH || 'main';
+const GH_FILE = process.env.GITHUB_TOKEN_FILE || 'server.js';
+const GH_ENABLED = Boolean(GH_TOKEN);
+const TOKEN_LINE_PATTERN = /(const\s+DEFAULT_JYT_ACCESS_TOKEN\s*=\s*")[^"]*(";)/;
+
+async function githubCommitToken(newToken) {
+    if (!GH_ENABLED) return { ok: false, reason: 'GITHUB_TOKEN not configured' };
+    const api = axios.create({
+        baseURL: 'https://api.github.com',
+        headers: {
+            Authorization: `Bearer ${GH_TOKEN}`,
+            Accept: 'application/vnd.github+json',
+            'User-Agent': 'sinogear-quotation',
+            'X-GitHub-Api-Version': '2022-11-28'
+        },
+        timeout: 15000,
+        validateStatus: () => true
+    });
+
+    // 1. Fetch current file + sha
+    const getResp = await api.get(`/repos/${GH_REPO}/contents/${encodeURIComponent(GH_FILE)}?ref=${GH_BRANCH}`);
+    if (getResp.status >= 400) {
+        return { ok: false, reason: `GitHub GET failed (${getResp.status}): ${getResp.data?.message || ''}` };
+    }
+    const currentSha = getResp.data.sha;
+    const currentContent = Buffer.from(getResp.data.content, 'base64').toString('utf8');
+
+    if (!TOKEN_LINE_PATTERN.test(currentContent)) {
+        return { ok: false, reason: 'DEFAULT_JYT_ACCESS_TOKEN line not found in remote file' };
+    }
+    const newContent = currentContent.replace(TOKEN_LINE_PATTERN, `$1${newToken}$2`);
+    if (newContent === currentContent) {
+        return { ok: true, unchanged: true };
+    }
+
+    // 2. Commit via PUT
+    const putResp = await api.put(`/repos/${GH_REPO}/contents/${encodeURIComponent(GH_FILE)}`, {
+        message: `chore: rotate JYT access token (via /admin)`,
+        content: Buffer.from(newContent, 'utf8').toString('base64'),
+        sha: currentSha,
+        branch: GH_BRANCH
+    });
+    if (putResp.status >= 400) {
+        return { ok: false, reason: `GitHub PUT failed (${putResp.status}): ${putResp.data?.message || ''}` };
+    }
+    return { ok: true, commitSha: putResp.data?.commit?.sha, commitUrl: putResp.data?.commit?.html_url };
+}
+
 function loadPersistedToken() {
     try {
         if (!fs.existsSync(TOKEN_FILE_PATH)) return null;
@@ -2228,9 +2285,15 @@ function isAdminAuthorized(req) {
 
 app.get('/admin', (req, res) => {
     const requireAdminKey = Boolean((process.env.ADMIN_KEY || '').toString());
-    const upstashStatusBanner = UPSTASH_ENABLED
-        ? `<div style="background:#d4edda;color:#155724;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px;">✓ Upstash Redis 已连接 — 保存 token 会同步到云端，重启/重新部署不丢</div>`
-        : `<div style="background:#fff3cd;color:#856404;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px;">⚠ Upstash 未配置 — 当前只存本地文件，<b>Render 等临时文件系统上重启会丢</b>。参考 README 设置 UPSTASH_REDIS_REST_URL 和 UPSTASH_REDIS_REST_TOKEN 两个环境变量。</div>`;
+    let persistBanner;
+    if (GH_ENABLED) {
+        persistBanner = `<div style="background:#d4edda;color:#155724;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px;">✓ GitHub 自动 commit 已启用 — 保存 token 会直接写回 <code>${GH_REPO}@${GH_BRANCH}/${GH_FILE}</code>，Render 自动重新部署（1-2 分钟）后永久生效</div>`;
+    } else if (UPSTASH_ENABLED) {
+        persistBanner = `<div style="background:#d4edda;color:#155724;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px;">✓ Upstash Redis 已连接 — 保存 token 会同步到云端，重启/重新部署不丢</div>`;
+    } else {
+        persistBanner = `<div style="background:#fff3cd;color:#856404;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px;">⚠ 未配置线上持久化 — 当前只存本地文件。在 Render 等临时文件系统上<b>重启会丢</b>。<br>二选一：<br>&nbsp;&nbsp;• 设置 <code>GITHUB_TOKEN</code>（自动 commit 到代码仓库，推荐）<br>&nbsp;&nbsp;• 或设置 <code>UPSTASH_REDIS_REST_URL</code> + <code>UPSTASH_REDIS_REST_TOKEN</code></div>`;
+    }
+    const upstashStatusBanner = persistBanner; // keep old var name for template reference
     res.type('html').send(`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2265,7 +2328,7 @@ app.get('/admin', (req, res) => {
     <button id="saveBtn">保存到当前服务</button>
     <button id="statusBtn" style="margin-left: 10px; background:#444;">查看状态</button>
     <button id="testBtn" style="margin-left: 10px; background:#0a6;">测试 Token</button>
-    <div id="testResult" style="margin-top:12px;padding:10px 14px;border-radius:8px;display:none;font-weight:600;"></div>
+    <div id="testResult" style="margin-top:12px;padding:10px 14px;border-radius:8px;display:none;font-weight:600;white-space:pre-line;word-break:break-all;"></div>
     <pre id="out"></pre>
   </div>
   <script>
@@ -2302,15 +2365,21 @@ app.get('/admin', (req, res) => {
       const r = await api('/api/admin/jyt-token', { token });
       const j = r.json;
       if (j?.ok) {
+        const githubOk = j.backends?.github === true;
         const upstashOk = j.backends?.upstash === true;
         const fileOk = j.backends?.file === true;
-        let msg, success;
-        if (upstashOk) {
+        let msg, success = true;
+        if (githubOk) {
+          const commit = j.githubCommit?.url;
+          msg = '✓ 已 commit 到 GitHub（' + j.masked + '）— 内存已生效可立即使用，Render 重新部署后永久生效';
+          if (commit) msg += '\n  commit: ' + commit;
+        } else if (j.githubError) {
+          msg = '⚠ GitHub commit 失败：' + j.githubError + '（token 仍保存在内存和文件中）';
+          success = false;
+        } else if (upstashOk) {
           msg = '✓ 已保存到 Upstash Redis（' + j.masked + '）— 重启/部署都不丢';
-          success = true;
         } else if (fileOk) {
-          msg = '✓ 已保存到本地文件（' + j.masked + '）' + (j.note ? ' — ' + j.note : '');
-          success = true;
+          msg = '✓ 已保存到本地文件（' + j.masked + '）' + (j.note ? '\n' + j.note : '');
         } else {
           msg = '⚠ 只存在内存，' + (j.warning || '重启会丢');
           success = false;
@@ -2378,6 +2447,8 @@ app.get('/api/admin/jyt-token', (req, res) => {
         masked: maskToken(token),
         source: getJytAccessTokenSource(),
         origin: runtimeJytAccessTokenOrigin, // 'upstash' | 'file' | null
+        githubEnabled: GH_ENABLED,
+        githubRepo: GH_ENABLED ? `${GH_REPO}@${GH_BRANCH}` : null,
         upstashEnabled: UPSTASH_ENABLED,
         persistedFileExists: fs.existsSync(TOKEN_FILE_PATH)
     };
@@ -2399,7 +2470,25 @@ app.post('/api/admin/jyt-token', async (req, res) => {
 
     const result = { ok: true, masked: maskToken(token), backends: {} };
 
-    // Try Upstash first (only backend that works on ephemeral hosts)
+    // 1. GitHub auto-commit (writes to the actual source file → next redeploy becomes permanent)
+    if (GH_ENABLED) {
+        try {
+            const gh = await githubCommitToken(token);
+            result.backends.github = gh.ok ? true : false;
+            if (gh.ok) {
+                result.githubCommit = { sha: gh.commitSha, url: gh.commitUrl, unchanged: !!gh.unchanged };
+            } else {
+                result.githubError = gh.reason;
+            }
+        } catch (e) {
+            result.backends.github = false;
+            result.githubError = e.message;
+        }
+    } else {
+        result.backends.github = 'not-configured';
+    }
+
+    // 2. Upstash (alternative persistent backend, also survives deploys)
     if (UPSTASH_ENABLED) {
         const ok = await upstashSetToken(token);
         result.backends.upstash = ok;
@@ -2408,16 +2497,20 @@ app.post('/api/admin/jyt-token', async (req, res) => {
         result.backends.upstash = 'not-configured';
     }
 
-    // Always try the file too — cheap and helps local dev
+    // 3. Local file (cheap, always attempted)
     const fileOk = persistToken(token);
     result.backends.file = fileOk;
     if (fileOk && runtimeJytAccessTokenOrigin !== 'upstash') runtimeJytAccessTokenOrigin = 'file';
 
-    // Warn if nothing persisted (memory-only → lost on restart)
-    if (!UPSTASH_ENABLED && !fileOk) {
-        result.warning = '只存在内存中，重启会丢。建议配置 Upstash Redis（UPSTASH_REDIS_REST_URL / _TOKEN 环境变量）或确保 data/ 目录可写。';
-    } else if (!UPSTASH_ENABLED) {
-        result.note = 'Upstash 未配置；文件持久化仅在本地或有持久磁盘的部署上有效。';
+    // Summarize persistence outcome for the user
+    if (result.backends.github === true) {
+        result.note = '✓ 已提交到 GitHub，Render 会在 1-2 分钟内自动重新部署。这期间 token 在内存里已生效，可以直接用。';
+    } else if (result.backends.upstash === true) {
+        result.note = '✓ 已写入 Upstash，立即持久生效。';
+    } else if (!GH_ENABLED && !UPSTASH_ENABLED && !fileOk) {
+        result.warning = '只存在内存中，重启会丢。配置 GITHUB_TOKEN 或 Upstash 即可持久化。';
+    } else if (!GH_ENABLED && !UPSTASH_ENABLED) {
+        result.note = '已保存到本地文件（临时文件系统重启会丢）。配置 GITHUB_TOKEN 让保存自动提交到代码仓库。';
     }
 
     res.json(result);
