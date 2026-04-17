@@ -27,6 +27,7 @@ function parseNonNegativeInt(value, fallback) {
 }
 
 let runtimeJytAccessToken = null;
+let runtimeJytAccessTokenSetAt = null;
 
 function normalizeJytAccessToken(token) {
     const t = (token ?? '').toString().trim();
@@ -1701,7 +1702,8 @@ app.get('/api/jyt-car', async (req, res) => {
                 if (!isInnerApiUrl(url)) return;
                 const status = response.status();
                 console.log(`${logPrefix} api response status=${status} url=${url}`);
-                
+                if (status === 401) debugInfo.api_401 = true;
+
                 if (!isCarApiUrl(url)) return; // Only capture data from car api
 
                 try {
@@ -1908,7 +1910,12 @@ app.get('/api/jyt-car', async (req, res) => {
             if (browser) await browser.close();
         }
 
-        if (!data) return res.status(502).json({ error: "Failed to fetch data from JYT (Puppeteer)", car_code: carCode, debug: debugInfo });
+        if (!data) {
+            if (debugInfo.api_401) {
+                return res.status(401).json({ error: "TOKEN_EXPIRED", message: "JYT Access-Token 已失效，请到 /admin 页面更新 Token", car_code: carCode, debug: debugInfo });
+            }
+            return res.status(502).json({ error: "Failed to fetch data from JYT (Puppeteer)", car_code: carCode, debug: debugInfo });
+        }
         
         const usdCnyRateOverride = Number.parseFloat(req.query.usd_cny_rate);
         const fobMarkupCnyOverride = Number.parseFloat(req.query.fob_markup_cny);
@@ -2024,7 +2031,7 @@ app.get('/proxy-image', async (req, res) => {
 
 function isAdminAuthorized(req) {
     const adminKey = (process.env.ADMIN_KEY || '').toString();
-    if (!adminKey) return false;
+    if (!adminKey) return true; // No ADMIN_KEY set → open admin access (convenient for local use)
     const candidate = (
         req.get('x-admin-key') ||
         req.query.key ||
@@ -2035,7 +2042,7 @@ function isAdminAuthorized(req) {
 }
 
 app.get('/admin', (req, res) => {
-    if (!(process.env.ADMIN_KEY || '').toString()) return res.status(404).send('Not Found');
+    const requireAdminKey = Boolean((process.env.ADMIN_KEY || '').toString());
     res.type('html').send(`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2057,10 +2064,10 @@ app.get('/admin', (req, res) => {
   <div class="box">
     <h2>JYT Access Token</h2>
     <div class="row">
-      <div>
+      ${requireAdminKey ? `<div>
         <label>ADMIN_KEY</label>
         <input id="adminKey" type="password" autocomplete="off" />
-      </div>
+      </div>` : ''}
       <div>
         <label>JYT_ACCESS_TOKEN</label>
         <input id="token" type="password" autocomplete="off" />
@@ -2068,17 +2075,21 @@ app.get('/admin', (req, res) => {
     </div>
     <button id="saveBtn">保存到当前服务</button>
     <button id="statusBtn" style="margin-left: 10px; background:#444;">查看状态</button>
+    <button id="testBtn" style="margin-left: 10px; background:#0a6;">测试 Token</button>
+    <div id="testResult" style="margin-top:12px;padding:10px 14px;border-radius:8px;display:none;font-weight:600;"></div>
     <pre id="out"></pre>
   </div>
   <script>
     const out = document.getElementById('out');
+    const testResult = document.getElementById('testResult');
     const adminKeyEl = document.getElementById('adminKey');
     const tokenEl = document.getElementById('token');
     const saveBtn = document.getElementById('saveBtn');
     const statusBtn = document.getElementById('statusBtn');
+    const testBtn = document.getElementById('testBtn');
 
     async function api(path, body) {
-      const key = adminKeyEl.value || '';
+      const key = adminKeyEl ? (adminKeyEl.value || '') : '';
       const res = await fetch(path, {
         method: body ? 'POST' : 'GET',
         headers: { 'Content-Type': 'application/json', 'x-admin-key': key },
@@ -2090,6 +2101,13 @@ app.get('/admin', (req, res) => {
       return { ok: res.ok, status: res.status, json, text };
     }
 
+    function showTestResult(valid, msg) {
+      testResult.style.display = 'block';
+      testResult.style.background = valid ? '#d4edda' : '#f8d7da';
+      testResult.style.color = valid ? '#155724' : '#721c24';
+      testResult.textContent = msg;
+    }
+
     saveBtn.addEventListener('click', async () => {
       const token = tokenEl.value || '';
       const r = await api('/api/admin/jyt-token', { token });
@@ -2098,7 +2116,40 @@ app.get('/admin', (req, res) => {
 
     statusBtn.addEventListener('click', async () => {
       const r = await api('/api/admin/jyt-token');
-      out.textContent = JSON.stringify(r.json || { status: r.status, text: r.text }, null, 2);
+      const j = r.json;
+      let display = j || { status: r.status, text: r.text };
+      if (j && j.ageMinutes != null) {
+        display = Object.assign({}, j, { age: j.ageMinutes + ' 分钟前设置' });
+      }
+      out.textContent = JSON.stringify(display, null, 2);
+    });
+
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      testBtn.textContent = '测试中...';
+      testResult.style.display = 'none';
+      try {
+        // Test the value currently in the input field (without saving).
+        // If input is empty, fall back to testing the saved token.
+        const inputToken = (tokenEl.value || '').trim();
+        const r = await api('/api/admin/jyt-token-test', inputToken ? { token: inputToken } : {});
+        const j = r.json;
+        if (!r.ok) {
+          showTestResult(false, '请求失败: ' + (j?.error || r.text));
+        } else if (j?.valid) {
+          const which = j.tested === 'input' ? '（输入框的 token）' : '（已保存的 token）';
+          showTestResult(true, 'Token 有效 ' + which + ' — HTTP ' + j.status);
+        } else {
+          const which = j?.tested === 'input' ? '（输入框的 token）' : '（已保存的 token）';
+          showTestResult(false, 'Token 无效 ' + which + ': ' + (j?.reason || 'unknown'));
+        }
+        out.textContent = JSON.stringify(j || { status: r.status, text: r.text }, null, 2);
+      } catch (e) {
+        showTestResult(false, '网络错误: ' + e.message);
+      } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = '测试 Token';
+      }
     });
   </script>
 </body>
@@ -2107,26 +2158,81 @@ app.get('/admin', (req, res) => {
 
 app.get('/api/admin/jyt-token', (req, res) => {
     if (!isAdminAuthorized(req)) {
-        if (!(process.env.ADMIN_KEY || '').toString()) return res.status(404).json({ error: 'Not Found' });
         return res.status(401).json({ error: 'Unauthorized' });
     }
     const token = getJytAccessToken();
-    res.json({
-        hasToken: Boolean(token),
-        masked: maskToken(token),
-        source: runtimeJytAccessToken ? 'runtime' : (process.env.JYT_ACCESS_TOKEN ? 'env' : 'default')
-    });
+    const source = runtimeJytAccessToken ? 'runtime' : (process.env.JYT_ACCESS_TOKEN ? 'env' : 'default');
+    const result = { hasToken: Boolean(token), masked: maskToken(token), source };
+    if (runtimeJytAccessTokenSetAt) {
+        result.setAt = runtimeJytAccessTokenSetAt.toISOString();
+        result.ageMinutes = Math.round((Date.now() - runtimeJytAccessTokenSetAt.getTime()) / 60000);
+    }
+    res.json(result);
 });
 
 app.post('/api/admin/jyt-token', (req, res) => {
     if (!isAdminAuthorized(req)) {
-        if (!(process.env.ADMIN_KEY || '').toString()) return res.status(404).json({ error: 'Not Found' });
         return res.status(401).json({ error: 'Unauthorized' });
     }
     const token = normalizeJytAccessToken(req.body?.token);
     if (!token) return res.status(400).json({ error: 'token required' });
     runtimeJytAccessToken = token;
+    runtimeJytAccessTokenSetAt = new Date();
     res.json({ ok: true, masked: maskToken(token) });
+});
+
+async function testJytToken(token) {
+    if (!token) return { valid: false, reason: 'token 为空' };
+    const testUrl = 'https://inner-h5.jytche.com/inner-api/v2/car/test_placeholder';
+    const resp = await axios.get(testUrl, {
+        headers: {
+            'Access-Token': token,
+            'from-type': 'h5',
+            'Origin': 'https://h5.jytche.com',
+            'Referer': 'https://h5.jytche.com/',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+            'Accept': 'application/json, text/plain, */*'
+        },
+        timeout: 10000,
+        validateStatus: () => true
+    });
+    const status = resp.status;
+    const body = resp.data;
+    if (status === 401 || status === 403) {
+        return { valid: false, status, reason: `Token 已失效 (HTTP ${status})`, body };
+    }
+    // JYT sometimes returns 200 with auth error in body
+    if (body && typeof body === 'object') {
+        const code = body.code ?? body.status ?? body.errcode;
+        const msg = (body.msg || body.message || '').toString();
+        if (code === 401 || code === 403 || /token|未登录|未授权|过期|无效/i.test(msg)) {
+            return { valid: false, status, reason: `Token 无效: code=${code} msg=${msg}`, body };
+        }
+    }
+    return { valid: true, status, reason: `Token 有效 (HTTP ${status})`, body };
+}
+
+// POST with optional body.token: if provided, test that exact token; else test saved
+app.post('/api/admin/jyt-token-test', async (req, res) => {
+    if (!isAdminAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
+    const provided = normalizeJytAccessToken(req.body?.token);
+    const token = provided || getJytAccessToken();
+    try {
+        const result = await testJytToken(token);
+        res.json({ ...result, tested: provided ? 'input' : 'saved', masked: maskToken(token) });
+    } catch (e) {
+        res.json({ valid: false, reason: `请求失败: ${e.message}` });
+    }
+});
+
+app.get('/api/admin/jyt-token-test', async (req, res) => {
+    if (!isAdminAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        const result = await testJytToken(getJytAccessToken());
+        res.json({ ...result, tested: 'saved' });
+    } catch (e) {
+        res.json({ valid: false, reason: `请求失败: ${e.message}` });
+    }
 });
 
 // Start server

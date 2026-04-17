@@ -422,6 +422,9 @@ async function fetchJytData() {
         const data = await res.json();
         
         if (!res.ok) {
+            if (data && data.error === 'TOKEN_EXPIRED') {
+                throw new Error('JYT Token 已失效，请到 /admin 页面更新 Access-Token');
+            }
             const debugText = data && data.debug ? `\n\nDEBUG:\n${JSON.stringify(data.debug, null, 2)}` : '';
             throw new Error((data.error || "Failed to fetch") + debugText);
         }
