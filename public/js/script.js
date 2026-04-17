@@ -371,28 +371,43 @@ fileInput.addEventListener('change', function(event) {
     fileInput.value = '';
 });
 
-// 导出 PDF 逻辑
-function exportPDF() {
+// 导出 PDF — 通过服务器端 Puppeteer 渲染（分页规则完整保留）
+async function exportPDF(btn) {
     const element = document.getElementById('quotation-content');
-    document.body.classList.add('exporting');
-    
-    // 配置 PDF 导出选项
-    const opt = {
-        margin:       0,
-        filename:     'SinoGear-Quotation.pdf',
-        image:        { type: 'jpeg', quality: 0.98 },
-        html2canvas:  { scale: 2, useCORS: true }, 
-        jsPDF:        { unit: 'px', format: [794, 1123], orientation: 'portrait' },
-        pagebreak:    { mode: ['css', 'legacy'] }
-    };
+    if (!element) {
+        alert('Quotation content not found.');
+        return;
+    }
+    const originalText = btn ? btn.innerText : null;
+    if (btn) { btn.innerText = 'Generating PDF...'; btn.disabled = true; }
 
-    // 生成 PDF
-    html2pdf().set(opt).from(element).save().then(() => {
-        document.body.classList.remove('exporting');
-    }).catch(err => {
+    try {
+        const html = element.outerHTML;
+        const res = await fetch('/api/pdf', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ html, filename: 'SinoGear-Quotation.pdf' })
+        });
+        if (!res.ok) {
+            let msg = 'PDF generation failed (' + res.status + ')';
+            try { const j = await res.json(); if (j?.detail) msg += ': ' + j.detail; } catch (_) {}
+            throw new Error(msg);
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'SinoGear-Quotation.pdf';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
         console.error(err);
-        document.body.classList.remove('exporting');
-    });
+        alert('Error generating PDF: ' + err.message);
+    } finally {
+        if (btn) { btn.innerText = originalText; btn.disabled = false; }
+    }
 }
 
 // Fetch JYT Data

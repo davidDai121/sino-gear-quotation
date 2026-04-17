@@ -2,3 +2,9 @@ node_modules
 .DS_Store
 public/debug_last_run.png
 public/debug_error.png
+
+# Persisted runtime data (contains JYT access token, never commit)
+data/
+
+# Diagnostic/exploration scripts output
+scripts/*.log

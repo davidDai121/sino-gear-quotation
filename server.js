@@ -29,6 +29,83 @@ function parseNonNegativeInt(value, fallback) {
 let runtimeJytAccessToken = null;
 let runtimeJytAccessTokenSetAt = null;
 
+// Storage backends for the JYT access token, in priority order:
+//   1. Upstash Redis (if UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN are set)
+//      → the only option that survives deploys on ephemeral hosts like Render free tier
+//   2. Local JSON file at ./data/jyt-token.json (survives restarts on persistent disk)
+//   3. JYT_ACCESS_TOKEN env var (platform dashboard)
+//   4. Hardcoded DEFAULT_JYT_ACCESS_TOKEN (usually expired — last resort)
+const TOKEN_FILE_PATH = path.join(__dirname, 'data', 'jyt-token.json');
+const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const UPSTASH_KEY = process.env.UPSTASH_JYT_KEY || 'sinogear:jyt-access-token';
+const UPSTASH_ENABLED = Boolean(UPSTASH_URL && UPSTASH_TOKEN);
+
+async function upstashCommand(args) {
+    if (!UPSTASH_ENABLED) return null;
+    const resp = await axios.post(UPSTASH_URL, args, {
+        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+        timeout: 8000,
+        validateStatus: () => true
+    });
+    if (resp.status >= 400) throw new Error(`upstash ${resp.status}: ${JSON.stringify(resp.data).slice(0, 200)}`);
+    return resp.data?.result ?? null;
+}
+
+async function upstashGetToken() {
+    try {
+        const raw = await upstashCommand(['GET', UPSTASH_KEY]);
+        if (!raw) return null;
+        try {
+            const obj = JSON.parse(raw);
+            return { token: obj.token, setAt: obj.setAt };
+        } catch (_) {
+            // Plain string token — tolerate it
+            return { token: raw, setAt: null };
+        }
+    } catch (e) {
+        console.log(`[upstash] get error: ${e.message}`);
+        return null;
+    }
+}
+
+async function upstashSetToken(token) {
+    try {
+        const payload = JSON.stringify({ token, setAt: new Date().toISOString() });
+        await upstashCommand(['SET', UPSTASH_KEY, payload]);
+        return true;
+    } catch (e) {
+        console.log(`[upstash] set error: ${e.message}`);
+        return false;
+    }
+}
+
+function loadPersistedToken() {
+    try {
+        if (!fs.existsSync(TOKEN_FILE_PATH)) return null;
+        const raw = fs.readFileSync(TOKEN_FILE_PATH, 'utf8');
+        const obj = JSON.parse(raw);
+        const t = (obj?.token || '').toString().trim();
+        return t ? { token: t, setAt: obj?.setAt || null } : null;
+    } catch (e) {
+        console.log(`[token] failed to load persisted token: ${e.message}`);
+        return null;
+    }
+}
+
+function persistToken(token) {
+    try {
+        const dir = path.dirname(TOKEN_FILE_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const payload = { token, setAt: new Date().toISOString() };
+        fs.writeFileSync(TOKEN_FILE_PATH, JSON.stringify(payload, null, 2), 'utf8');
+        return true;
+    } catch (e) {
+        console.log(`[token] failed to persist token: ${e.message}`);
+        return false;
+    }
+}
+
 function normalizeJytAccessToken(token) {
     const t = (token ?? '').toString().trim();
     return t ? t : null;
@@ -37,6 +114,39 @@ function normalizeJytAccessToken(token) {
 function getJytAccessToken() {
     return runtimeJytAccessToken || process.env.JYT_ACCESS_TOKEN || DEFAULT_JYT_ACCESS_TOKEN;
 }
+
+function getJytAccessTokenSource() {
+    if (runtimeJytAccessToken) return 'runtime';
+    if (process.env.JYT_ACCESS_TOKEN) return 'env';
+    return 'default';
+}
+
+// Tracks which backend produced the current in-memory token (for status UI).
+let runtimeJytAccessTokenOrigin = null; // 'upstash' | 'file' | null
+
+// Load persisted token at startup. Try Upstash first (survives deploys),
+// then fall back to the local file.
+async function hydrateRuntimeToken() {
+    if (UPSTASH_ENABLED) {
+        const remote = await upstashGetToken();
+        if (remote?.token) {
+            runtimeJytAccessToken = remote.token;
+            runtimeJytAccessTokenSetAt = remote.setAt ? new Date(remote.setAt) : new Date();
+            runtimeJytAccessTokenOrigin = 'upstash';
+            console.log(`[token] loaded from Upstash (set at ${runtimeJytAccessTokenSetAt.toISOString()})`);
+            return;
+        }
+    }
+    const persisted = loadPersistedToken();
+    if (persisted) {
+        runtimeJytAccessToken = persisted.token;
+        runtimeJytAccessTokenSetAt = persisted.setAt ? new Date(persisted.setAt) : new Date();
+        runtimeJytAccessTokenOrigin = 'file';
+        console.log(`[token] loaded from file (set at ${runtimeJytAccessTokenSetAt.toISOString()})`);
+    }
+}
+
+hydrateRuntimeToken().catch(e => console.log(`[token] hydrate error: ${e.message}`));
 
 function maskToken(token) {
     const t = (token ?? '').toString();
@@ -2025,7 +2135,82 @@ app.get('/proxy-image', async (req, res) => {
         response.data.pipe(res);
     } catch (error) {
         console.error('Proxy error:', error.message, 'URL:', imageUrl);
-        res.redirect(imageUrl); 
+        res.redirect(imageUrl);
+    }
+});
+
+// Server-side PDF rendering via Puppeteer. Client POSTs the quotation HTML;
+// server wraps it in a full page with the site CSS, then uses page.pdf() which
+// honors CSS print rules (break-inside: avoid etc.) natively.
+app.post('/api/pdf', express.json({ limit: '15mb' }), async (req, res) => {
+    const html = (req.body?.html || '').toString();
+    const filename = (req.body?.filename || 'SinoGear-Quotation.pdf').toString().replace(/[^\w.\-]/g, '_');
+    if (!html) return res.status(400).json({ error: 'html required' });
+
+    const origin = `http://127.0.0.1:${PORT}`;
+    const fullHtml = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<base href="${origin}/">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link rel="stylesheet" href="${origin}/css/style.css">
+<style>
+  /* Print overrides: enforce page breaks and remove UI chrome */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  .toolbar, .add-btn-container, .delete-btn, .add-label-btn { display: none !important; }
+  .img-container, .card, .section-title { break-inside: avoid; page-break-inside: avoid; }
+  .section-title { break-after: avoid; page-break-after: avoid; }
+  img { max-width: 100%; }
+</style>
+</head>
+<body class="exporting">
+${html}
+</body>
+</html>`;
+
+    let browser = null;
+    const startedAt = Date.now();
+    try {
+        browser = await puppeteer.launch({
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        });
+        const page = await browser.newPage();
+        await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 2 });
+        await page.setContent(fullHtml, { waitUntil: 'networkidle0', timeout: 30000 });
+
+        // Make sure all images have actually loaded (networkidle0 sometimes misses lazy/async)
+        await page.evaluate(async () => {
+            const imgs = Array.from(document.images || []);
+            await Promise.all(imgs.map(img => {
+                if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
+                return new Promise(resolve => {
+                    img.addEventListener('load', resolve, { once: true });
+                    img.addEventListener('error', resolve, { once: true });
+                    setTimeout(resolve, 8000);
+                });
+            }));
+        });
+
+        const pdfBuffer = await page.pdf({
+            format: 'A4',
+            printBackground: true,
+            preferCSSPageSize: false,
+            margin: { top: '0', right: '0', bottom: '0', left: '0' }
+        });
+
+        console.log(`[pdf] generated ${pdfBuffer.length} bytes in ${Date.now() - startedAt}ms`);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(pdfBuffer);
+    } catch (e) {
+        console.error('[pdf] error:', e?.message || e);
+        res.status(500).json({ error: 'PDF generation failed', detail: e?.message || String(e) });
+    } finally {
+        if (browser) {
+            try { await browser.close(); } catch (_) {}
+        }
     }
 });
 
@@ -2043,6 +2228,9 @@ function isAdminAuthorized(req) {
 
 app.get('/admin', (req, res) => {
     const requireAdminKey = Boolean((process.env.ADMIN_KEY || '').toString());
+    const upstashStatusBanner = UPSTASH_ENABLED
+        ? `<div style="background:#d4edda;color:#155724;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px;">✓ Upstash Redis 已连接 — 保存 token 会同步到云端，重启/重新部署不丢</div>`
+        : `<div style="background:#fff3cd;color:#856404;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px;">⚠ Upstash 未配置 — 当前只存本地文件，<b>Render 等临时文件系统上重启会丢</b>。参考 README 设置 UPSTASH_REDIS_REST_URL 和 UPSTASH_REDIS_REST_TOKEN 两个环境变量。</div>`;
     res.type('html').send(`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2063,6 +2251,7 @@ app.get('/admin', (req, res) => {
 <body>
   <div class="box">
     <h2>JYT Access Token</h2>
+    ${upstashStatusBanner}
     <div class="row">
       ${requireAdminKey ? `<div>
         <label>ADMIN_KEY</label>
@@ -2111,7 +2300,26 @@ app.get('/admin', (req, res) => {
     saveBtn.addEventListener('click', async () => {
       const token = tokenEl.value || '';
       const r = await api('/api/admin/jyt-token', { token });
-      out.textContent = JSON.stringify(r.json || { status: r.status, text: r.text }, null, 2);
+      const j = r.json;
+      if (j?.ok) {
+        const upstashOk = j.backends?.upstash === true;
+        const fileOk = j.backends?.file === true;
+        let msg, success;
+        if (upstashOk) {
+          msg = '✓ 已保存到 Upstash Redis（' + j.masked + '）— 重启/部署都不丢';
+          success = true;
+        } else if (fileOk) {
+          msg = '✓ 已保存到本地文件（' + j.masked + '）' + (j.note ? ' — ' + j.note : '');
+          success = true;
+        } else {
+          msg = '⚠ 只存在内存，' + (j.warning || '重启会丢');
+          success = false;
+        }
+        showTestResult(success, msg);
+      } else {
+        showTestResult(false, '保存失败: ' + (j?.error || r.status));
+      }
+      out.textContent = JSON.stringify(j || { status: r.status, text: r.text }, null, 2);
     });
 
     statusBtn.addEventListener('click', async () => {
@@ -2119,7 +2327,11 @@ app.get('/admin', (req, res) => {
       const j = r.json;
       let display = j || { status: r.status, text: r.text };
       if (j && j.ageMinutes != null) {
-        display = Object.assign({}, j, { age: j.ageMinutes + ' 分钟前设置' });
+        const sourceLabels = { runtime: '内存/文件', env: '环境变量', default: '默认（已硬编码，大概率过期）' };
+        display = Object.assign({}, j, {
+          age: j.ageMinutes + ' 分钟前设置',
+          sourceLabel: sourceLabels[j.source] || j.source
+        });
       }
       out.textContent = JSON.stringify(display, null, 2);
     });
@@ -2161,8 +2373,14 @@ app.get('/api/admin/jyt-token', (req, res) => {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     const token = getJytAccessToken();
-    const source = runtimeJytAccessToken ? 'runtime' : (process.env.JYT_ACCESS_TOKEN ? 'env' : 'default');
-    const result = { hasToken: Boolean(token), masked: maskToken(token), source };
+    const result = {
+        hasToken: Boolean(token),
+        masked: maskToken(token),
+        source: getJytAccessTokenSource(),
+        origin: runtimeJytAccessTokenOrigin, // 'upstash' | 'file' | null
+        upstashEnabled: UPSTASH_ENABLED,
+        persistedFileExists: fs.existsSync(TOKEN_FILE_PATH)
+    };
     if (runtimeJytAccessTokenSetAt) {
         result.setAt = runtimeJytAccessTokenSetAt.toISOString();
         result.ageMinutes = Math.round((Date.now() - runtimeJytAccessTokenSetAt.getTime()) / 60000);
@@ -2170,7 +2388,7 @@ app.get('/api/admin/jyt-token', (req, res) => {
     res.json(result);
 });
 
-app.post('/api/admin/jyt-token', (req, res) => {
+app.post('/api/admin/jyt-token', async (req, res) => {
     if (!isAdminAuthorized(req)) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -2178,7 +2396,31 @@ app.post('/api/admin/jyt-token', (req, res) => {
     if (!token) return res.status(400).json({ error: 'token required' });
     runtimeJytAccessToken = token;
     runtimeJytAccessTokenSetAt = new Date();
-    res.json({ ok: true, masked: maskToken(token) });
+
+    const result = { ok: true, masked: maskToken(token), backends: {} };
+
+    // Try Upstash first (only backend that works on ephemeral hosts)
+    if (UPSTASH_ENABLED) {
+        const ok = await upstashSetToken(token);
+        result.backends.upstash = ok;
+        if (ok) runtimeJytAccessTokenOrigin = 'upstash';
+    } else {
+        result.backends.upstash = 'not-configured';
+    }
+
+    // Always try the file too — cheap and helps local dev
+    const fileOk = persistToken(token);
+    result.backends.file = fileOk;
+    if (fileOk && runtimeJytAccessTokenOrigin !== 'upstash') runtimeJytAccessTokenOrigin = 'file';
+
+    // Warn if nothing persisted (memory-only → lost on restart)
+    if (!UPSTASH_ENABLED && !fileOk) {
+        result.warning = '只存在内存中，重启会丢。建议配置 Upstash Redis（UPSTASH_REDIS_REST_URL / _TOKEN 环境变量）或确保 data/ 目录可写。';
+    } else if (!UPSTASH_ENABLED) {
+        result.note = 'Upstash 未配置；文件持久化仅在本地或有持久磁盘的部署上有效。';
+    }
+
+    res.json(result);
 });
 
 async function testJytToken(token) {
