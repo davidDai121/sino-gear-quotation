@@ -2417,6 +2417,13 @@ app.get('/admin', (req, res) => {
     <pre id="out"></pre>
   </div>
   <script>
+    console.log('[admin] script loaded');
+    window.addEventListener('error', (e) => {
+      console.error('[admin] GLOBAL ERROR:', e.message, 'at', e.filename + ':' + e.lineno);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      console.error('[admin] UNHANDLED PROMISE REJECTION:', e.reason);
+    });
     const out = document.getElementById('out');
     const testResult = document.getElementById('testResult');
     const adminKeyEl = document.getElementById('adminKey');
@@ -2424,6 +2431,7 @@ app.get('/admin', (req, res) => {
     const saveBtn = document.getElementById('saveBtn');
     const statusBtn = document.getElementById('statusBtn');
     const testBtn = document.getElementById('testBtn');
+    console.log('[admin] elements:', { out: !!out, testResult: !!testResult, adminKeyEl: !!adminKeyEl, tokenEl: !!tokenEl, saveBtn: !!saveBtn, statusBtn: !!statusBtn, testBtn: !!testBtn });
 
     async function api(path, body) {
       const key = adminKeyEl ? (adminKeyEl.value || '') : '';
@@ -2457,14 +2465,14 @@ app.get('/admin', (req, res) => {
         if (githubOk) {
           const commit = j.githubCommit?.url;
           msg = '✓ 已 commit 到 GitHub（' + j.masked + '）— 内存已生效可立即使用，Render 重新部署后永久生效';
-          if (commit) msg += '\n  commit: ' + commit;
+          if (commit) msg += '\\n  commit: ' + commit;
         } else if (j.githubError) {
           msg = '⚠ GitHub commit 失败：' + j.githubError + '（token 仍保存在内存和文件中）';
           success = false;
         } else if (upstashOk) {
           msg = '✓ 已保存到 Upstash Redis（' + j.masked + '）— 重启/部署都不丢';
         } else if (fileOk) {
-          msg = '✓ 已保存到本地文件（' + j.masked + '）' + (j.note ? '\n' + j.note : '');
+          msg = '✓ 已保存到本地文件（' + j.masked + '）' + (j.note ? '\\n' + j.note : '');
         } else {
           msg = '⚠ 只存在内存，' + (j.warning || '重启会丢');
           success = false;
