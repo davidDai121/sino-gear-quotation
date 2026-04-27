@@ -9,7 +9,7 @@ const puppeteer = require('puppeteer');
 const app = express();
 const PORT = process.env.PORT || 8081;
 
-const DEFAULT_JYT_ACCESS_TOKEN = "d6fc3ebbc062a95403315f6e17b5aa38";
+const DEFAULT_JYT_ACCESS_TOKEN = "d6fc3ebb1b3a015c83f7b12c695c277a";
 const DEFAULT_USD_CNY_RATE = 6.8;
 const DEFAULT_FOB_MARKUP_CNY = 20000;
 
